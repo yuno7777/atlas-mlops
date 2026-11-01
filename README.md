@@ -2,11 +2,12 @@
 
 **Self-hosted tabular MLOps platform for training, experiment tracking, versioned registry, real-time inference, and drift monitoring.**
 
+[![Atlas CI](https://github.com/yuno7777/mlops-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/yuno7777/mlops-platform/actions/workflows/ci.yml)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![React 19](https://img.shields.io/badge/React-19-61DAFB?style=flat&logo=react&logoColor=black)](https://react.dev)
-[![MLflow](https://img.shields.io/badge/MLflow-2.20+-0194E2?style=flat&logo=mlflow&logoColor=white)](https://mlflow.org)
-[![Celery](https://img.shields.io/badge/Celery-5.4+-37814A?style=flat&logo=celery&logoColor=white)](https://docs.celeryq.dev)
+[![MLflow](https://img.shields.io/badge/MLflow-3.17-0194E2?style=flat&logo=mlflow&logoColor=white)](https://mlflow.org)
+[![Celery](https://img.shields.io/badge/Celery-5.6-37814A?style=flat&logo=celery&logoColor=white)](https://docs.celeryq.dev)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker&logoColor=white)](https://docker.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -115,6 +116,18 @@ docker compose up -d --build
 | FastAPI Interactive Docs | [http://localhost:8000/docs](http://localhost:8000/docs) | None |
 | MLflow Tracking Dashboard | [http://localhost:5000](http://localhost:5000) | None |
 | Prometheus Metrics | [http://localhost:8000/metrics](http://localhost:8000/metrics) | None |
+
+### Deploy to a VPS
+
+The production override puts the full stack behind Caddy with automatic HTTPS and closes
+every port except 80 and 443:
+
+```bash
+# Set DOMAIN, SECRET_KEY, and POSTGRES_PASSWORD in .env first
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the single-server checklist.
 
 ---
 

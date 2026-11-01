@@ -88,3 +88,9 @@ jobs:
 
       - name: Validate Docker Compose Config
         run: docker compose config
+
+      - name: Validate Production Compose Config
+        env:
+          DOMAIN: atlas.example.com
+          SECRET_KEY: ci-only-secret-key-with-32-characters
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config

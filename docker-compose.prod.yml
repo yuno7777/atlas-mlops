@@ -1,0 +1,43 @@
+services:
+  postgres:
+    ports: !override []
+
+  redis:
+    ports: !override []
+
+  mlflow:
+    ports: !override []
+
+  backend:
+    ports: !override []
+    environment:
+      CORS_ORIGINS: https://${DOMAIN:?Set DOMAIN in .env}
+
+  worker:
+    environment:
+      CORS_ORIGINS: https://${DOMAIN:?Set DOMAIN in .env}
+
+  frontend:
+    ports: !override []
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: atlas-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      frontend:
+        condition: service_started
+
+volumes:
+  caddy_data:
+  caddy_config:

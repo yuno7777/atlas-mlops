@@ -45,6 +45,33 @@ docker compose ps
 Artifacts persist in named volumes. `docker compose down` keeps data;
 `docker compose down -v` destroys databases and artifacts.
 
+## Production on a Single VPS (Caddy + TLS)
+
+The production override closes every port except 80 and 443. Caddy obtains a Let's
+Encrypt certificate for `DOMAIN` and proxies to the frontend; nginx forwards `/api` to
+the backend. A 4 GB RAM server is enough for the full stack with a small demo dataset.
+
+1. Point an A/AAAA record at the server and install Docker with the Compose plugin.
+2. Copy `.env.example` to `.env` and set the deployment values:
+
+```env
+DOMAIN=atlas.example.com
+SECRET_KEY=<32+ random characters>
+POSTGRES_PASSWORD=<strong password>
+```
+
+3. Start the stack with both compose files:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backend python -m app.cli seed-demo
+```
+
+4. Open `https://atlas.example.com`.
+
+The first Caddy start can take a minute while certificates are issued. Postgres, Redis,
+MLflow, and the API stay on the private Compose network. Keep `.env` out of git.
+
 ## Configuration
 
 All configuration is environment-based (`backend/app/core/config.py`, `.env.example`).
@@ -53,6 +80,7 @@ Key variables:
 | Variable | Default | Purpose |
 |---|---|---|
 | `SECRET_KEY` | dev placeholder | JWT signing; must be changed |
+| `DOMAIN` | none | Public hostname for the production Caddy override |
 | `DATABASE_URL` | postgres in compose | SQLAlchemy URL |
 | `REDIS_URL` | redis://redis:6379/0 | Celery broker/backend |
 | `JOB_EXECUTION_MODE` | thread (local), celery (compose) | Worker strategy |
