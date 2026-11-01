@@ -1,0 +1,36 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "postgres: requires a PostgreSQL test database",
+    "mlflow: exercises a local MLflow tracking store",
+    "torch: requires PyTorch",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:mlflow.*",
+    "ignore::UserWarning:sklearn.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "C4", "RET", "PTH", "S"]
+ignore = [
+    "S101",
+    "S311",
+    "E501",
+    "B008",
+    "SIM108",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B", "PTH"]
+"app/core/config.py" = ["S104"]
+"scripts/*" = ["S", "PTH"]
+"alembic/env.py" = ["I001"]
+
+[tool.ruff.format]
+quote-style = "double"
