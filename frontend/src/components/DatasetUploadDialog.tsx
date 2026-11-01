@@ -139,7 +139,7 @@ export function DatasetUploadDialog({
           </>
         ) : null}
 
-        <div>
+        <div className="field">
           <span className="field-label">File</span>
           <button
             type="button"

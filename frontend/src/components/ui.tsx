@@ -549,7 +549,13 @@ export function Modal({
             <h2 id={titleId}>{title}</h2>
             {description ? <p id={descriptionId}>{description}</p> : null}
           </div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close dialog">
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            aria-label="Close dialog"
+            data-modal-close
+          >
             <Icon name="close" size={16} />
           </button>
         </div>
