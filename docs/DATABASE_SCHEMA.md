@@ -41,6 +41,13 @@ erDiagram
   deployments ||--o{ prediction_logs : "logs"
   model_versions ||--o{ prediction_logs : "inferred with"
   deployments ||--o{ monitoring_results : "checks"
+  deployments ||--o{ deployment_rollouts : "rolls out"
+  model_versions ||--o{ deployment_rollouts : "candidate"
+  users ||--o{ deployment_rollouts : "starts"
+  projects ||--o{ workflow_runs : "pipelines"
+  dataset_versions ||--o{ workflow_runs : "evaluated"
+  training_jobs ||--o{ workflow_runs : "linked job"
+  workflow_runs ||--o{ workflow_runs : "retry parent"
   workspaces ||--o{ audit_events : "audit"
   users ||--o{ audit_events : "actor"
 ```
@@ -333,6 +340,51 @@ Index (deployment_id, created_at DESC).
 | created_at | timestamptz | |
 
 Index (workspace_id, created_at DESC), (action).
+
+### deployment_rollouts
+
+| Column | Type | Notes |
+|---|---|---|
+| id | string PK | UUID |
+| deployment_id | FK deployments.id | cascade |
+| candidate_version_id | FK model_versions.id | restrict |
+| status | string(20) | running/promoted/rolled_back/cancelled |
+| traffic_steps | JSON | Increasing candidate traffic percentages, ending at 100 |
+| current_step | int | Current rollout stage index |
+| gates | JSON | Sample, error-rate, latency, label-count, and quality thresholds |
+| last_evaluation | JSON | Most recent gate evidence and decision |
+| started_at, step_started_at | timestamptz | Rollout and current-stage start |
+| last_evaluated_at, completed_at | timestamptz nullable | Evaluation and terminal timestamps |
+| created_by | FK users.id | restrict |
+| created_at, updated_at | timestamptz | |
+
+Indexes: (deployment_id, status) and a partial unique index on `deployment_id` where
+`status = 'running'`, allowing at most one active rollout per deployment.
+
+### workflow_runs
+
+| Column | Type | Notes |
+|---|---|---|
+| id | string PK | UUID |
+| project_id | FK projects.id | cascade |
+| dataset_version_id | FK dataset_versions.id | restrict |
+| training_job_id | FK training_jobs.id nullable | set null; generated training/benchmark job |
+| parent_run_id | FK workflow_runs.id nullable | set null; previous retry attempt |
+| template_id | string(80) | Versioned-in-code reusable recipe identifier |
+| name | string(160) | User-facing run name |
+| status | string(20) | queued/scheduled/running/completed/failed/cancelled |
+| step_states | JSON | Pipeline step state and detail |
+| config | JSON | Effective training, split, fairness, and recipe settings |
+| cache_key | string(64) | SHA-256 dataset checksum and stable configuration |
+| cache_hit | bool | True if an identical successful run was reused |
+| attempt, max_attempts | int | Retry count and configured limit |
+| scheduled_at, started_at, completed_at | timestamptz nullable | Execution timestamps |
+| error_message | text nullable | Failure detail |
+| created_by | FK users.id | restrict |
+| created_at, updated_at | timestamptz | |
+
+Indexes: (project_id, created_at), (status, scheduled_at), and
+(project_id, cache_key, status).
 
 ## Cascading Behavior
 

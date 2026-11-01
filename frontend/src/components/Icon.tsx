@@ -240,6 +240,14 @@ const paths: Record<string, ReactNode> = {
       <path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.5-1.5" />
     </>
   ),
+  'git-branch': (
+    <>
+      <circle cx="6" cy="4" r="2" />
+      <circle cx="18" cy="6" r="2" />
+      <circle cx="6" cy="20" r="2" />
+      <path d="M6 6v12M18 8a6 6 0 0 1-6 6H8" />
+    </>
+  ),
   lock: (
     <>
       <rect x="4" y="10" width="16" height="11" rx="2" />

@@ -1,20 +1,21 @@
 import { useEffect, useState } from 'react'
 import { api, errorMessage } from '../api/client'
 import { useApi, useDocumentTitle } from '../api/hooks'
-import type { AuditEvent, Member, SystemInfo, User } from '../api/types'
+import type { SystemInfo, User } from '../api/types'
 import { useAuth } from '../auth/AuthProvider'
 import { useWorkspace } from '../auth/WorkspaceProvider'
 import { useToast } from '../components/ToastProvider'
+import { TeamSettingsPanel } from '../components/TeamSettingsPanel'
+import { AuditLogPanel } from '../components/AuditLogPanel'
+import { AlertSettingsPanel } from '../components/AlertSettingsPanel'
 import {
   Button,
   DefinitionGrid,
-  EmptyState,
   ErrorBlock,
   Field,
   Input,
   PageHeader,
   Panel,
-  Pill,
   SectionHeader,
   StatusPill,
   Tabs,
@@ -23,10 +24,9 @@ import {
   formatDate,
   formatDateTime,
   relativeTime,
-  statusLabel,
 } from '../lib/format'
 
-type SettingsTab = 'profile' | 'workspace' | 'system'
+type SettingsTab = 'profile' | 'workspace' | 'audit' | 'alerts' | 'system'
 
 export function SettingsPage() {
   useDocumentTitle('Settings')
@@ -34,14 +34,6 @@ export function SettingsPage() {
   const { workspace, project } = useWorkspace()
   const toast = useToast()
   const [tab, setTab] = useState<SettingsTab>('profile')
-
-  const members = useApi<Member[]>(
-    tab === 'workspace' && workspace ? `/workspaces/${workspace.id}/members` : null,
-  )
-  const audit = useApi<AuditEvent[]>(
-    tab === 'workspace' && project ? `/projects/${project.id}/audit-events` : null,
-    { limit: 12 },
-  )
   const system = useApi<SystemInfo>(tab === 'system' ? '/system/info' : null)
 
   return (
@@ -49,12 +41,14 @@ export function SettingsPage() {
       <PageHeader
         eyebrow="Workspace"
         title="Settings"
-        description="Your account, the people with access, and the runtime this Atlas instance is using."
+        description="Manage your account, workspace access, audit history, alert destinations, and runtime details."
       />
       <Tabs
         items={[
           { id: 'profile', label: 'Profile' },
           { id: 'workspace', label: 'Workspace' },
+          { id: 'audit', label: 'Audit log' },
+          { id: 'alerts', label: 'Alerts' },
           { id: 'system', label: 'System' },
         ]}
         value={tab}
@@ -106,90 +100,12 @@ export function SettingsPage() {
                 {project?.description ? <p className="panel-note">{project.description}</p> : null}
               </Panel>
             </div>
-
-            <Panel>
-              <SectionHeader
-                title="Members"
-                description="Accounts with access to this workspace."
-                action={
-                  <Pill tone="neutral">
-                    {members.data?.length ?? 0} member{(members.data?.length ?? 0) === 1 ? '' : 's'}
-                  </Pill>
-                }
-              />
-              {members.error ? (
-                <ErrorBlock compact message={members.error} onRetry={members.reload} />
-              ) : members.data?.length ? (
-                <div className="table-wrap">
-                  <table className="data">
-                    <thead>
-                      <tr>
-                        <th>Name</th>
-                        <th>Email</th>
-                        <th>Role</th>
-                        <th className="num">Joined</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {members.data.map((member) => (
-                        <tr key={member.user_id}>
-                          <td style={{ fontWeight: 500 }}>{member.full_name}</td>
-                          <td className="muted">{member.email}</td>
-                          <td>
-                            <Pill tone={member.role === 'owner' ? 'info' : 'neutral'}>
-                              {statusLabel(member.role)}
-                            </Pill>
-                          </td>
-                          <td className="num muted">{formatDate(member.joined_at)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : members.loading ? (
-                <div className="panel-note">Loading members…</div>
-              ) : (
-                <EmptyState
-                  compact
-                  icon="users"
-                  title="No members found"
-                  description="Workspace membership will appear here."
-                />
-              )}
-            </Panel>
-
-            <Panel>
-              <SectionHeader
-                title="Project activity"
-                description="Recent changes recorded in the audit log."
-              />
-              {audit.data?.length ? (
-                <div className="activity-list">
-                  {audit.data.map((event) => (
-                    <div className="activity-row" key={event.id}>
-                      <div className="activity-mark" aria-hidden="true" />
-                      <div className="activity-main">
-                        <div>
-                          <span className="mono" style={{ fontSize: 12 }}>
-                            {event.action}
-                          </span>{' '}
-                          <span className="muted">on {event.resource_type}</span>
-                        </div>
-                        <div className="cell-sub">
-                          {event.user_email ?? 'System'} · {formatDateTime(event.created_at)}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : audit.loading ? (
-                <div className="panel-note">Loading activity…</div>
-              ) : (
-                <p className="chart-empty">No activity recorded for this project yet.</p>
-              )}
-            </Panel>
+            <TeamSettingsPanel workspaceId={workspace?.id ?? null} role={workspace?.role} />
           </div>
         ) : null}
+
+        {tab === 'audit' ? <AuditLogPanel /> : null}
+        {tab === 'alerts' ? <AlertSettingsPanel /> : null}
 
         {tab === 'system' ? (
           <div className="settings-grid">
@@ -205,18 +121,9 @@ export function SettingsPage() {
                   items={[
                     { label: 'Version', value: system.data.version },
                     { label: 'Environment', value: system.data.environment },
-                    {
-                      label: 'Execution',
-                      value: <span className="mono">{system.data.execution_mode}</span>,
-                    },
-                    {
-                      label: 'Database',
-                      value: <span className="mono">{system.data.database}</span>,
-                    },
-                    {
-                      label: 'Artifact storage',
-                      value: <span className="mono">{system.data.storage_backend}</span>,
-                    },
+                    { label: 'Execution', value: <span className="mono">{system.data.execution_mode}</span> },
+                    { label: 'Database', value: <span className="mono">{system.data.database}</span> },
+                    { label: 'Artifact storage', value: <span className="mono">{system.data.storage_backend}</span> },
                     {
                       label: 'Monitoring scheduler',
                       value: (
@@ -284,7 +191,6 @@ export function SettingsPage() {
     </>
   )
 }
-
 function ProfilePanel({
   user,
   onSaved,

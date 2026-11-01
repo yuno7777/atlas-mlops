@@ -327,7 +327,7 @@ export function OverviewPage() {
                   <div className="stack-sm">
                     {data.recent_events.slice(0, 5).map((event) => (
                       <div
-                        key={event.id}
+                        key={`${event.id}-${event.action}-${event.resource_type}-${event.resource_id ?? 'none'}`}
                         style={{ padding: '7px 0', borderBottom: '1px solid var(--rule)' }}
                       >
                         <div style={{ fontSize: 12.5 }}>{event.action.replaceAll('.', ' · ')}</div>

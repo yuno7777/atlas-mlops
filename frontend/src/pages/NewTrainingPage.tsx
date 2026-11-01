@@ -45,6 +45,7 @@ interface TrainingRequest {
   problem_type: ProblemType
   target_column: string | null
   feature_columns: string[] | null
+  sensitive_columns: string[]
   algorithms: AlgorithmChoice[]
   test_size: number
   random_seed: number
@@ -85,6 +86,7 @@ export function NewTrainingPage() {
   const [target, setTarget] = useState('')
   const [allFeatures, setAllFeatures] = useState(true)
   const [features, setFeatures] = useState<string[]>([])
+  const [sensitiveColumns, setSensitiveColumns] = useState<string[]>([])
   const [selectedAlgorithms, setSelectedAlgorithms] = useState<AlgorithmChoice[]>([])
   const [runName, setRunName] = useState('')
   const [testSize, setTestSize] = useState(0.2)
@@ -131,12 +133,16 @@ export function NewTrainingPage() {
     setVersionChoice('')
     setTarget('')
     setFeatures([])
+    setSensitiveColumns([])
   }
 
   const chooseProblem = (next: ProblemType) => {
     setProblemType(next)
     setSelectedAlgorithms([])
-    if (next === 'clustering') setTarget('')
+    if (next === 'clustering') {
+      setTarget('')
+      setSensitiveColumns([])
+    }
   }
 
   const toggleAlgorithm = (algorithm: Algorithm) => {
@@ -211,6 +217,7 @@ export function NewTrainingPage() {
       problem_type: problemType as ProblemType,
       target_column: problemType === 'clustering' ? null : target || null,
       feature_columns: allFeatures ? null : features,
+      sensitive_columns: sensitiveColumns,
       algorithms: selectedAlgorithms,
       test_size: testSize,
       random_seed: randomSeed,
@@ -323,6 +330,7 @@ export function NewTrainingPage() {
                         setVersionChoice(event.target.value)
                         setTarget('')
                         setFeatures([])
+                        setSensitiveColumns([])
                       }}
                       disabled={!datasetChoice || !versions.data?.length}
                     >
@@ -411,6 +419,7 @@ export function NewTrainingPage() {
                               onChange={(event) => {
                                 const nextTarget = event.target.value
                                 setTarget(nextTarget)
+                                setSensitiveColumns((current) => current.filter((column) => column !== nextTarget))
                                 setFeatures((current) =>
                                   current.filter((column) => column !== nextTarget),
                                 )
@@ -435,6 +444,7 @@ export function NewTrainingPage() {
                                   onClick={() => {
                                     setTarget(suggestion.column)
                                     setProblemType(suggestion.task)
+                                    setSensitiveColumns((current) => current.filter((column) => column !== suggestion.column))
                                   }}
                                 >
                                   <Icon name="target" size={12} />
@@ -448,6 +458,29 @@ export function NewTrainingPage() {
                       ) : null}
 
                       <div className="feature-choice">
+                        {problemType !== 'clustering' ? (
+                          <div className="sensitive-audit-block">
+                            <strong>Sensitive audit columns</strong>
+                            <p className="field-hint">Selected columns are excluded from model features and used for held-out subgroup metrics and the model card.</p>
+                            <div className="feature-grid">
+                              {versionDetail.data.schema
+                                .filter((column) => column.name !== target)
+                                .map((column) => (
+                                  <Checkbox
+                                    key={`audit-${column.name}`}
+                                    checked={sensitiveColumns.includes(column.name)}
+                                    onChange={(checked) => {
+                                      setSensitiveColumns((current) => checked
+                                        ? [...current, column.name]
+                                        : current.filter((name) => name !== column.name))
+                                      if (checked) setFeatures((current) => current.filter((name) => name !== column.name))
+                                    }}
+                                    label={<><span className="mono">{column.name}</span><span className="cell-sub">Audit only · {column.kind}</span></>}
+                                  />
+                                ))}
+                            </div>
+                          </div>
+                        ) : null}
                         <Checkbox
                           label="Use all available columns as features"
                           checked={allFeatures}
@@ -455,12 +488,12 @@ export function NewTrainingPage() {
                         />
                         {allFeatures ? (
                           <p className="field-hint" style={{ margin: '4px 0 0 26px' }}>
-                            Target and unusable columns are excluded automatically.
+                            Target, audit, and unusable columns are excluded automatically.
                           </p>
                         ) : (
                           <div className="feature-grid">
                             {versionDetail.data.schema
-                              .filter((column) => column.name !== target)
+                              .filter((column) => column.name !== target && !sensitiveColumns.includes(column.name))
                               .map((column) => (
                                 <Checkbox
                                   key={column.name}

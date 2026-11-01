@@ -8,6 +8,8 @@ from fastapi import APIRouter
 from app.api.deps import CurrentUser
 from app.core.config import get_settings
 from app.schemas.common import HealthResponse, SystemInfoResponse
+from app.schemas.modelops import SLOSnapshot
+from app.services.slo import system_slo_snapshot
 
 router = APIRouter(tags=["System"])
 
@@ -57,3 +59,8 @@ def system_info(user: CurrentUser) -> SystemInfoResponse:
         monitoring_scheduler=settings.enable_monitoring_scheduler,
         timestamp=datetime.now(UTC),
     )
+
+
+@router.get("/system/slo", response_model=SLOSnapshot)
+def system_slo(user: CurrentUser) -> SLOSnapshot:
+    return system_slo_snapshot()

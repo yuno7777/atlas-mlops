@@ -146,6 +146,7 @@ export function ExperimentDetailPage() {
   const registered = Boolean(current.registered_model_id)
   const canRegister = current.status === 'completed' && !registered
   const kpiMetrics = metrics.slice(0, 4)
+  const fairnessReport = (current.metrics as Record<string, unknown>).fairness
 
   return (
     <>
@@ -276,6 +277,16 @@ export function ExperimentDetailPage() {
                 description="Mean and spread across folds for this algorithm."
               />
               <JsonBlock value={current.cv_metrics} />
+            </Panel>
+          ) : null}
+
+          {fairnessReport ? (
+            <Panel>
+              <SectionHeader
+                title="Fairness assessment"
+                description="Held-out subgroup metrics for audit columns kept out of model features. Interpret alongside group sample counts and domain context."
+              />
+              <JsonBlock value={fairnessReport} />
             </Panel>
           ) : null}
 

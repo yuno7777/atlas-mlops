@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from app.api.deps import ClientIP, CurrentUser, Database, page_payload
 from app.schemas.common import Page
+from app.schemas.modelops import ModelCardResponse
 from app.schemas.registry import (
     ModelDetail,
     ModelRegisterRequest,
@@ -16,6 +17,7 @@ from app.schemas.registry import (
     VersionCompareResponse,
 )
 from app.services import registry as registry_service
+from app.services.model_cards import get_model_card, model_card_markdown
 
 router = APIRouter(tags=["Model registry"])
 
@@ -92,6 +94,20 @@ def compare_model_versions(
 @router.get("/model-versions/{version_id}", response_model=ModelVersionSummary)
 def get_model_version(version_id: str, db: Database, user: CurrentUser) -> ModelVersionSummary:
     return registry_service.get_version(db, user, version_id)
+
+
+@router.get("/model-versions/{version_id}/card", response_model=ModelCardResponse)
+def model_card(version_id: str, db: Database, user: CurrentUser) -> ModelCardResponse:
+    return get_model_card(db, user, version_id)
+
+
+@router.get("/model-versions/{version_id}/card.md", response_class=PlainTextResponse)
+def model_card_markdown_file(version_id: str, db: Database, user: CurrentUser) -> PlainTextResponse:
+    card = get_model_card(db, user, version_id)
+    return PlainTextResponse(
+        model_card_markdown(card),
+        headers={"Content-Disposition": f'attachment; filename="model-card-{version_id[:8]}.md"'},
+    )
 
 
 @router.post("/model-versions/{version_id}/promote", response_model=ModelVersionSummary)

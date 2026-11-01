@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class WorkspaceOut(BaseModel):
@@ -48,9 +49,46 @@ class ProjectCreateRequest(BaseModel):
 
 class AuditEventOut(BaseModel):
     id: int
+    workspace_id: str | None = None
+    project_id: str | None = None
     action: str
     resource_type: str
     resource_id: str | None
     details: dict
     user_email: str | None
+    ip_address: str | None = None
     created_at: datetime
+
+
+class InviteCreateRequest(BaseModel):
+    email: EmailStr
+    role: Literal["admin", "member", "viewer"] = "member"
+
+
+class InviteOut(BaseModel):
+    id: str
+    workspace_id: str
+    email: str
+    role: str
+    status: str
+    expires_at: datetime
+    accepted_at: datetime | None
+    revoked_at: datetime | None
+    created_at: datetime
+    invited_by_email: str | None = None
+
+
+class InviteCreated(InviteOut):
+    token: str
+    invite_url: str
+
+
+class MemberRoleUpdateRequest(BaseModel):
+    role: Literal["admin", "member", "viewer"]
+
+
+class AuditEventPage(BaseModel):
+    items: list[AuditEventOut]
+    total: int
+    offset: int
+    limit: int

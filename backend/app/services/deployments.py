@@ -52,6 +52,7 @@ def _deployment_summary(
     deployment: Deployment, latest_monitoring_status: str | None = None
 ) -> DeploymentSummary:
     model_version = deployment.model_version
+    challenger = deployment.challenger_model_version
     model = deployment.registered_model
     return DeploymentSummary(
         id=deployment.id,
@@ -64,6 +65,10 @@ def _deployment_summary(
         model_version=model_version.version if model_version else 0,
         algorithm=model_version.algorithm if model_version else "",
         stage=model_version.stage if model_version else ModelStage.NONE,
+        challenger_model_version_id=deployment.challenger_model_version_id,
+        challenger_model_version=challenger.version if challenger else None,
+        challenger_algorithm=challenger.algorithm if challenger else None,
+        challenger_traffic_percent=int(deployment.challenger_traffic_percent or 0),
         api_key_prefix=deployment.api_key_prefix,
         description=deployment.description,
         last_request_at=deployment.last_request_at,
@@ -633,6 +638,7 @@ def prediction_response_log(log: PredictionLog, include_features: bool) -> Predi
         features=log.features if include_features else None,
         prediction=log.prediction,
         status=log.status,
+        variant=log.variant,
         error_message=log.error_message,
         latency_ms=log.latency_ms,
         actual=log.actual,

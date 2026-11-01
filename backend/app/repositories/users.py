@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+from app.models.collaboration import WorkspaceInvite
 from app.models.user import Project, User, Workspace, WorkspaceMember
 
 
@@ -68,6 +71,48 @@ class WorkspaceRepository:
             .scalars()
             .all()
         )
+
+    def get_invite(self, invite_id: str) -> WorkspaceInvite | None:
+        return self.db.get(WorkspaceInvite, invite_id)
+
+    def get_invite_by_hash(self, token_hash: str) -> WorkspaceInvite | None:
+        return self.db.execute(
+            select(WorkspaceInvite).where(WorkspaceInvite.token_hash == token_hash)
+        ).scalar_one_or_none()
+
+    def list_invites(self, workspace_id: str) -> list[WorkspaceInvite]:
+        return list(
+            self.db.execute(
+                select(WorkspaceInvite)
+                .options(joinedload(WorkspaceInvite.inviter))
+                .where(WorkspaceInvite.workspace_id == workspace_id)
+                .order_by(WorkspaceInvite.created_at.desc())
+            )
+            .scalars()
+            .all()
+        )
+
+    def pending_invites(
+        self, workspace_id: str, email: str, now: datetime
+    ) -> list[WorkspaceInvite]:
+        return list(
+            self.db.execute(
+                select(WorkspaceInvite).where(
+                    WorkspaceInvite.workspace_id == workspace_id,
+                    WorkspaceInvite.email == email.lower(),
+                    WorkspaceInvite.accepted_at.is_(None),
+                    WorkspaceInvite.revoked_at.is_(None),
+                    WorkspaceInvite.expires_at > now,
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    def add_invite(self, invite: WorkspaceInvite) -> WorkspaceInvite:
+        self.db.add(invite)
+        self.db.flush()
+        return invite
 
     def get_project(self, project_id: str) -> Project | None:
         return self.db.get(Project, project_id)

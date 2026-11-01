@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, errorMessage } from '../api/client'
 import { useApi, useDocumentTitle } from '../api/hooks'
-import type { DeploymentSummary, MonitoringResult, Page } from '../api/types'
+import type { DeploymentSummary, MonitoringResult, Page, SLOSnapshot } from '../api/types'
 import { useWorkspace } from '../auth/WorkspaceProvider'
 import { FeatureDriftList } from '../components/charts'
 import { useToast } from '../components/ToastProvider'
@@ -20,6 +20,7 @@ import {
 } from '../components/ui'
 import {
   formatNumber,
+  formatPercent,
   formatShare,
   monitoringTone,
   relativeTime,
@@ -37,6 +38,7 @@ export function MonitoringPage() {
     { project_id: project?.id, page_size: 50 },
     { pollMs: 30000 },
   )
+  const slo = useApi<SLOSnapshot>('/system/slo', undefined, { pollMs: 30000 })
 
   const [scanningId, setScanningId] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -116,6 +118,30 @@ export function MonitoringPage() {
             },
           ]}
         />
+
+        <Panel>
+          <SectionHeader
+            title="Service level objectives"
+            description="HTTP availability and latency SLIs from the Prometheus process registry. Values reset when the API process restarts."
+            action={slo.data ? <StatusPill status={slo.data.status} label={statusLabel(slo.data.status)} tone={slo.data.status === 'met' ? 'positive' : slo.data.status === 'no_data' ? 'neutral' : 'negative'} /> : undefined}
+          />
+          {slo.error ? <ErrorBlock message={slo.error} onRetry={slo.reload} /> : null}
+          {slo.data ? (
+            <>
+              <KpiStrip items={[
+                { label: 'Availability', value: slo.data.availability === null ? '—' : formatPercent(slo.data.availability), sub: `${formatPercent(slo.data.availability_target)} objective` },
+                { label: 'P95 latency', value: slo.data.p95_latency_ms === null ? '—' : `${formatNumber(slo.data.p95_latency_ms, 1)} ms`, sub: `Target ≤ ${formatNumber(slo.data.latency_target_ms)} ms` },
+                { label: 'Latency SLI', value: slo.data.latency_sli === null ? '—' : formatPercent(slo.data.latency_sli), sub: `${formatPercent(slo.data.latency_target)} of requests within target` },
+                { label: 'Error budget used', value: slo.data.availability_error_budget_percent_used === null ? '—' : `${formatNumber(slo.data.availability_error_budget_percent_used, 1)}%`, sub: `${formatNumber(slo.data.server_errors)} server errors · ${formatNumber(slo.data.requests)} requests` },
+              ]} />
+              <div className="otel-status-row">
+                <span><strong>OpenTelemetry tracing:</strong> {slo.data.trace_export_enabled ? 'OTLP export enabled' : 'Not configured'}</span>
+                {slo.data.trace_export_endpoint ? <code>{slo.data.trace_export_endpoint}</code> : <span className="muted">Set OTEL_EXPORTER_OTLP_ENDPOINT to export request traces.</span>}
+                <span className="muted">Window: {slo.data.window}</span>
+              </div>
+            </>
+          ) : null}
+        </Panel>
 
         <div className="table-card">
           <div className="table-toolbar">

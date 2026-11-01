@@ -37,6 +37,10 @@ class Deployment(Base, UUIDMixin, TimestampMixin):
     model_version_id: Mapped[str] = mapped_column(
         ForeignKey("model_versions.id", ondelete="RESTRICT"), nullable=False
     )
+    challenger_model_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_versions.id", ondelete="RESTRICT"), nullable=True
+    )
+    challenger_traffic_percent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     name: Mapped[str] = mapped_column(String(140), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(
@@ -53,7 +57,10 @@ class Deployment(Base, UUIDMixin, TimestampMixin):
         ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
 
-    model_version: Mapped[ModelVersion] = relationship()  # noqa: F821
+    model_version: Mapped[ModelVersion] = relationship(foreign_keys=[model_version_id])  # noqa: F821
+    challenger_model_version: Mapped[ModelVersion | None] = relationship(  # noqa: F821
+        foreign_keys=[challenger_model_version_id]
+    )
     registered_model: Mapped[RegisteredModel] = relationship()  # noqa: F821
     revisions: Mapped[list[DeploymentRevision]] = relationship(
         back_populates="deployment",
@@ -121,6 +128,7 @@ class PredictionLog(Base, UUIDMixin):
     __table_args__ = (
         Index("ix_prediction_logs_deployment_created", "deployment_id", "created_at"),
         Index("ix_prediction_logs_deployment_status", "deployment_id", "status", "created_at"),
+        Index("ix_prediction_logs_deployment_variant", "deployment_id", "variant", "created_at"),
         Index("ix_prediction_logs_created", "created_at"),
     )
 
@@ -134,6 +142,7 @@ class PredictionLog(Base, UUIDMixin):
     features: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     prediction: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="success", nullable=False)
+    variant: Mapped[str] = mapped_column(String(16), default="champion", nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     latency_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     actual: Mapped[Any | None] = mapped_column(JSON, nullable=True)

@@ -85,10 +85,10 @@ export function TrainingActivityChart({ data, height = 196 }: { data: TrainingPo
 
   return (
     <svg viewBox={`0 0 ${WIDTH} ${height}`} className="chart-svg" role="img" aria-label="Training runs by day">
-      {ticks.map((tick) => {
+      {ticks.map((tick, index) => {
         const y = MARGIN.top + plotHeight - (tick / max) * plotHeight
         return (
-          <g key={tick}>
+          <g key={`${index}-${tick}`}>
             <line
               x1={MARGIN.left}
               x2={WIDTH - MARGIN.right}
@@ -240,10 +240,10 @@ export function VolumeChart({ points, height = 180 }: { points: { bucket: string
 
   return (
     <svg viewBox={`0 0 ${WIDTH} ${height}`} className="chart-svg" role="img" aria-label="Prediction volume">
-      {ticks.map((tick) => {
+      {ticks.map((tick, index) => {
         const y = MARGIN.top + plotHeight - (tick / max) * plotHeight
         return (
-          <g key={tick}>
+          <g key={`${index}-${tick}`}>
             <line x1={MARGIN.left} x2={WIDTH - MARGIN.right} y1={y} y2={y} stroke="var(--grid)" vectorEffect="non-scaling-stroke" />
             <text x={MARGIN.left - 8} y={y + 3.5} textAnchor="end" className="chart-tick">
               {formatNumber(tick)}

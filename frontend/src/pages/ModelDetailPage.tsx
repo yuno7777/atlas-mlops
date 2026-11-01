@@ -170,6 +170,18 @@ export function ModelDetailPage() {
     }
   }
 
+  const downloadModelCard = async (version: ModelVersion) => {
+    if (!model.data) return
+    try {
+      await downloadFile(
+        `/model-versions/${version.id}/card.md`,
+        `${model.data.name}-v${version.version}-model-card.md`,
+      )
+    } catch (caught) {
+      toast.error(errorMessage(caught))
+    }
+  }
+
   const openCompare = async () => {
     if (!modelId || selected.length < 2) return
     setCompareOpen(true)
@@ -345,6 +357,15 @@ export function ModelDetailPage() {
                       <td className="num hide-sm muted">{formatDate(version.created_at)}</td>
                       <td className="actions-cell">
                         <div className="row-actions">
+                          <button
+                            type="button"
+                            className="icon-button"
+                            aria-label={`Download model card for version ${version.version}`}
+                            title="Download model card"
+                            onClick={() => void downloadModelCard(version)}
+                          >
+                            <Icon name="file" size={15} />
+                          </button>
                           <button
                             type="button"
                             className="icon-button"

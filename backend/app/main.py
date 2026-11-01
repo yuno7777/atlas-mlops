@@ -22,6 +22,7 @@ from app.core.exceptions import AppError, ServiceUnavailableError
 from app.core.logging import configure_logging, request_id_ctx
 from app.core.metrics import HTTP_LATENCY, HTTP_REQUESTS
 from app.core.security import generate_request_id
+from app.core.telemetry import configure_tracing, shutdown_tracing
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.schemas.common import HealthResponse, ReadinessCheck, ReadinessResponse
@@ -111,6 +112,7 @@ async def lifespan(app: FastAPI):
             scheduler_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await scheduler_task
+        shutdown_tracing()
         get_job_executor().shutdown(wait=False)
         logger.info("Atlas API stopped")
 
@@ -136,7 +138,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Request-ID"],
+        expose_headers=["X-Request-ID", "X-Trace-ID"],
     )
     app.add_middleware(GZipMiddleware, minimum_size=1024)
 
@@ -174,6 +176,12 @@ def create_app() -> FastAPI:
                 },
             )
             request_id_ctx.reset(token)
+
+    configure_tracing(
+        app,
+        service_name=settings.otel_service_name,
+        endpoint=settings.otel_exporter_otlp_endpoint,
+    )
 
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:

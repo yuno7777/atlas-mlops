@@ -136,6 +136,14 @@ def create_training_job(
         raise ValidationError("A target column is required for supervised training.")
     if target and target not in schema_columns:
         raise ValidationError(f"Target column '{target}' is not in the dataset.")
+    sensitive_columns = payload.sensitive_columns
+    missing_sensitive = [column for column in sensitive_columns if column not in schema_columns]
+    if missing_sensitive:
+        raise ValidationError(
+            f"Unknown sensitive audit columns: {', '.join(missing_sensitive[:10])}"
+        )
+    if target and target in sensitive_columns:
+        raise ValidationError("The target column cannot also be a sensitive audit column.")
     features = payload.feature_columns
     if features:
         missing = [column for column in features if column not in schema_columns]
@@ -143,8 +151,18 @@ def create_training_job(
             raise ValidationError(f"Unknown feature columns: {', '.join(missing[:10])}")
         if target and target in features:
             raise ValidationError("The target column cannot also be a feature.")
+        overlap = sorted(set(features) & set(sensitive_columns))
+        if overlap:
+            raise ValidationError(
+                "Sensitive audit columns must be excluded from model features: "
+                + ", ".join(overlap[:10])
+            )
     else:
-        available = [column for column in schema_columns if column != target]
+        available = [
+            column
+            for column in schema_columns
+            if column != target and column not in sensitive_columns
+        ]
         if len(available) < 2:
             raise ValidationError(
                 "At least two feature columns are required after excluding the target."
@@ -175,7 +193,20 @@ def create_training_job(
         "random_seed": payload.random_seed,
         "cv_folds": payload.cv_folds,
         "register_model_name": payload.register_model_name,
+        "sensitive_columns": sensitive_columns,
     }
+    if payload.workflow_run_id:
+        from app.models.modelops import WorkflowRun
+
+        workflow_run = db.get(WorkflowRun, payload.workflow_run_id)
+        if (
+            workflow_run is None
+            or workflow_run.project_id != project.id
+            or workflow_run.created_by != user.id
+            or workflow_run.status not in {"queued", "scheduled"}
+        ):
+            raise ValidationError("The workflow run is unavailable for this training job.")
+        config["workflow_run_id"] = workflow_run.id
     job = TrainingJob(
         project_id=project.id,
         dataset_version_id=dataset_version.id,
@@ -193,6 +224,11 @@ def create_training_job(
     )
     db.add(job)
     db.flush()
+    if payload.workflow_run_id:
+        workflow_run.training_job_id = job.id
+        workflow_run.status = "queued"
+        workflow_run.scheduled_at = None
+        workflow_run.updated_at = datetime.now(UTC)
     db.add(
         TrainingJobLog(
             job_id=job.id,

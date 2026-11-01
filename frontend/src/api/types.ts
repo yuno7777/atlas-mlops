@@ -39,6 +39,24 @@ export interface Member {
   joined_at: string
 }
 
+export interface WorkspaceInvite {
+  id: string
+  workspace_id: string
+  email: string
+  role: string
+  status: string
+  expires_at: string
+  accepted_at: string | null
+  revoked_at: string | null
+  created_at: string
+  invited_by_email: string | null
+}
+
+export interface CreatedWorkspaceInvite extends WorkspaceInvite {
+  token: string
+  invite_url: string
+}
+
 export interface Project {
   id: string
   workspace_id: string
@@ -387,6 +405,10 @@ export interface DeploymentSummary {
   model_name: string
   model_version_id: string
   model_version: number
+  challenger_model_version_id?: string | null
+  challenger_model_version?: number | null
+  challenger_algorithm?: string | null
+  challenger_traffic_percent?: number
   algorithm: string
   stage: string
   api_key_prefix: string
@@ -509,6 +531,7 @@ export interface PredictionLog {
   features: JsonObject | null
   prediction: unknown
   status: string
+  variant?: string
   error_message: string | null
   latency_ms: number
   actual: unknown
@@ -526,6 +549,7 @@ export interface PredictionResponse {
   deployment_id: string
   model_version_id: string
   model_version: number
+  variant?: string
   predictions: PredictionItem[]
   latency_ms: number
   warnings: string[]
@@ -653,7 +677,251 @@ export interface AuditEvent {
   resource_id: string | null
   details: JsonObject
   user_email: string | null
+  workspace_id?: string | null
+  project_id?: string | null
+  ip_address?: string | null
   created_at: string
+}
+
+export interface AuditEventPage {
+  items: AuditEvent[]
+  total: number
+  offset: number
+  limit: number
+}
+
+export interface AlertDelivery {
+  id: string
+  status: string
+  response_code: number | null
+  error_message: string | null
+  created_at: string
+}
+
+export interface AlertChannel {
+  id: string
+  project_id: string
+  name: string
+  kind: 'slack' | 'webhook'
+  target_url: string
+  min_status: 'warning' | 'critical'
+  enabled: boolean
+  has_secret: boolean
+  created_at: string
+  updated_at: string
+  last_delivery_status: string | null
+  last_delivery_at: string | null
+  recent_deliveries: AlertDelivery[]
+}
+
+export interface AlertTestResponse {
+  ok: boolean
+  response_code: number | null
+  error: string | null
+  delivered_at: string
+}
+
+export interface BatchPrediction {
+  id: string
+  deployment_id: string
+  model_version_id: string
+  status: string
+  original_filename: string
+  row_count: number
+  success_count: number
+  failed_count: number
+  preview: JsonObject[]
+  columns: string[]
+  error_message: string | null
+  created_at: string
+  completed_at: string | null
+}
+
+export interface ChallengerVariant {
+  variant: string
+  model_version_id: string
+  model_version: number | null
+  algorithm: string | null
+  predictions: number
+  failures: number
+  labeled: number
+  accuracy: number | null
+  avg_latency_ms: number
+  last_prediction_at: string | null
+}
+
+export interface ChallengerInfo {
+  deployment_id: string
+  champion_version_id: string
+  champion_version: number
+  champion_algorithm: string
+  challenger_version_id: string | null
+  challenger_version: number | null
+  challenger_algorithm: string | null
+  traffic_percent: number
+  variants: ChallengerVariant[]
+}
+
+export interface ReleaseGates {
+  min_samples: number
+  max_error_rate: number
+  max_p95_latency_ms: number
+  min_labeled_samples: number
+  max_metric_regression: number
+}
+
+export interface DeploymentRollout {
+  id: string
+  deployment_id: string
+  candidate_version_id: string
+  status: string
+  traffic_steps: number[]
+  current_step: number
+  current_traffic_percent: number
+  gates: ReleaseGates
+  last_evaluation: Record<string, unknown>
+  started_at: string
+  step_started_at: string
+  last_evaluated_at: string | null
+  completed_at: string | null
+  created_at: string
+}
+
+export interface PipelineTemplate {
+  id: string
+  name: string
+  problem_type: string
+  summary: string
+  metric_keys: string[]
+  algorithms: { algorithm: string; hyperparameters: JsonObject }[]
+  steps: { id: string; name: string; depends_on: string[]; optional?: boolean }[]
+  protocol: { test_size?: number; random_seed?: number; cv_folds?: number; split?: string }
+}
+
+export interface PipelineExperimentResult {
+  id: string
+  name: string
+  algorithm_label: string
+  status: string
+  metrics: MetricMap
+  cv_metrics: JsonObject | null
+  training_duration_seconds: number | null
+  error_message: string | null
+}
+
+export interface PipelineRun {
+  id: string
+  project_id: string
+  dataset_version_id: string
+  training_job_id: string | null
+  parent_run_id: string | null
+  template_id: string
+  name: string
+  status: string
+  step_states: { id: string; name: string; status: string; detail: string; depends_on: string[] }[]
+  config: JsonObject
+  cache_hit: boolean
+  attempt: number
+  max_attempts: number
+  scheduled_at: string | null
+  started_at: string | null
+  completed_at: string | null
+  error_message: string | null
+  created_at: string
+  experiments: PipelineExperimentResult[]
+}
+
+export interface BenchmarkReport {
+  training_job_id: string
+  name: string
+  dataset_name: string
+  dataset_version: number
+  dataset_version_id: string
+  problem_type: string
+  status: string
+  protocol: JsonObject
+  experiments: {
+    id: string
+    name: string
+    algorithm: string
+    algorithm_label: string
+    metrics: MetricMap
+    cv_metrics: JsonObject | null
+    training_duration_seconds: number | null
+    created_at: string
+  }[]
+  created_at: string
+}
+
+export interface SLOSnapshot {
+  window: string
+  requests: number
+  server_errors: number
+  availability: number | null
+  availability_target: number
+  availability_error_budget_percent_used: number | null
+  latency_sli: number | null
+  latency_target_ms: number
+  latency_target: number
+  p95_latency_ms: number | null
+  status: 'no_data' | 'met' | 'at_risk' | 'breached'
+  trace_export_enabled: boolean
+  trace_export_endpoint: string | null
+}
+
+export interface ModelCard {
+  schema_version: string
+  model: JsonObject
+  intended_use: JsonObject
+  training_data: JsonObject
+  evaluation: JsonObject
+  fairness: JsonObject | null
+  limitations: string[]
+  monitoring: JsonObject
+  provenance: JsonObject
+}
+
+export interface LineageNode {
+  id: string
+  kind: 'dataset' | 'training_job' | 'experiment' | 'model_version' | 'deployment'
+  label: string
+  subtitle: string | null
+  status: string | null
+  href: string | null
+  details: JsonObject
+}
+
+export interface LineageEdge {
+  source: string
+  target: string
+  label: string | null
+}
+
+export interface LineageResponse {
+  project_id: string
+  nodes: LineageNode[]
+  edges: LineageEdge[]
+}
+
+export interface FeatureContribution {
+  feature: string
+  value: unknown
+  contribution: number
+  direction: string
+}
+
+export interface ExplanationResponse {
+  deployment_id: string
+  model_version_id: string
+  model_version: number
+  problem_type: string
+  method: string
+  baseline: number
+  prediction: number
+  contributions: FeatureContribution[]
+  background_samples: number
+  permutations: number
+  latency_ms: number
 }
 
 export interface SystemInfo {

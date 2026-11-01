@@ -76,16 +76,45 @@ triggers exactly one retraining job per threshold/cooldown.
 - Overview, Datasets, Experiments, Training, Registry, Deployments, Monitoring,
   Settings.
 - Loading/error/empty states; tables; charts; compare workflows; polling.
-- API integration with TanStack Query; toasts for mutations.
+- API integration with shared request hooks, polling, and mutation toasts.
 
 Exit criteria: full lifecycle operable from the UI against the live API.
 
 ### M7 — Testing, CI, delivery
 
-- Backend unit/integration/e2e, frontend component tests, CI.
+- Backend unit/integration/e2e tests, Playwright browser workflows, CI.
 - Compose bring-up with health checks; smoke test.
 - Demo data generator + seed script; screenshots/instructions.
 - Final docs, limitations, next steps.
+
+### M8 - Advanced platform operations
+
+- Workspace invitations, role changes, and paginated audit events.
+- Dataset-to-deployment lineage, batch prediction artifacts, and per-record explanations.
+- Alert channels with signed webhook delivery.
+- Controlled champion/challenger traffic with explicit promotion or rejection.
+- Playwright browser workflows run in CI against a clean migrated and seeded instance.
+
+Exit criteria: backend integration and browser tests cover the workflows with real
+trained models where inference behavior is involved. The browser suite uses a local
+webhook receiver and does not call an external destination.
+
+### M9 — Release quality, fairness, and benchmark workflows
+
+- Progressive challenger rollouts with configurable traffic stages, quality gates,
+  automatic rollback, audit events, and deployment revision promotion.
+- Held-out subgroup fairness evaluation, exclusion of sensitive audit columns from
+  model inputs, and generated model cards in JSON and Markdown.
+- Reusable training/benchmark pipelines with persistent stage state, linked retries,
+  checksum/config cache reuse, and one-time scheduled execution.
+- Popular classification, imbalanced classification, regression, small-data, and
+  clustering recipe catalog with reproducible holdout/CV protocols and comparisons.
+- Optional OpenTelemetry OTLP request tracing and process-lifetime availability and
+  latency SLO reporting in the monitoring view.
+
+Exit criteria: rollout gate decisions are recorded and revert traffic safely; model
+cards retain data/experiment provenance; benchmark runs expose protocol, held-out
+metrics, CV spread, and duration; telemetry remains optional when no exporter is set.
 
 ## Work Breakdown and Dependencies
 

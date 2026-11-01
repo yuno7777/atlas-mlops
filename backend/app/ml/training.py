@@ -14,6 +14,7 @@ from app.ml.algorithms import AlgorithmSpec, build_estimator
 from app.ml.evaluation import (
     evaluate_classification,
     evaluate_clustering,
+    evaluate_fairness,
     evaluate_regression,
     primary_metric,
 )
@@ -39,6 +40,7 @@ class TrainingConfig:
     test_size: float = 0.2
     random_seed: int = 42
     cv_folds: int = 0
+    sensitive_columns: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -61,8 +63,15 @@ def _resolve_features(df: pd.DataFrame, config: TrainingConfig) -> list[str]:
             raise TrainingError(f"Feature columns not found in dataset: {', '.join(missing)}")
         if config.target_column and config.target_column in config.feature_columns:
             raise TrainingError("The target column cannot also be a feature.")
+        leaked = sorted(set(config.sensitive_columns) & set(config.feature_columns))
+        if leaked:
+            raise TrainingError(
+                "Sensitive audit columns must be excluded from model features: "
+                + ", ".join(leaked[:10])
+            )
         return list(config.feature_columns)
-    return [str(column) for column in df.columns if str(column) != config.target_column]
+    excluded = {config.target_column, *config.sensitive_columns}
+    return [str(column) for column in df.columns if str(column) not in excluded]
 
 
 def _prepare_supervised_target(
@@ -217,6 +226,7 @@ def train_algorithm(
         features = cleaned[feature_columns]
         split = _split(features, target, config, warnings)
         X_train, X_test, y_train, y_test = split
+        audit_groups = cleaned.loc[X_test.index, config.sensitive_columns]
     else:
         target = None
         features = df[feature_columns]
@@ -245,9 +255,17 @@ def train_algorithm(
         if config.problem_type == ProblemType.CLASSIFICATION:
             metrics = evaluate_classification(pipeline, test_frame, y_test)
             predictions = pipeline.predict(test_frame)
+            if config.sensitive_columns:
+                metrics["fairness"] = evaluate_fairness(
+                    y_test, predictions, audit_groups, "classification", pipeline.classes_
+                )
         elif config.problem_type == ProblemType.REGRESSION:
             metrics = evaluate_regression(pipeline, test_frame, y_test)
             predictions = pipeline.predict(test_frame)
+            if config.sensitive_columns:
+                metrics["fairness"] = evaluate_fairness(
+                    y_test, predictions, audit_groups, "regression", None
+                )
         else:
             metrics = evaluate_clustering(
                 pipeline.named_steps["preprocess"], pipeline.named_steps["model"], X_test

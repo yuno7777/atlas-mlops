@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     trusted_proxy_headers: bool = False
     sentry_dsn: str | None = None
 
+    otel_service_name: str = "atlas-api"
+    otel_exporter_otlp_endpoint: str | None = None
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

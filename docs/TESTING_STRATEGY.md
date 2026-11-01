@@ -6,9 +6,8 @@
 - ML tests train **real** estimators on small synthetic data; no mocked metrics.
 - API tests run against a real FastAPI app, real SQLAlchemy models, real file storage,
   and the real training runner in synchronous mode.
-- External MLflow is disabled in unit/integration tests for speed; a dedicated
-  integration test exercises local MLflow when installed. Compose verification covers
-  the server deployment.
+- External MLflow is disabled in the automated test fixtures. The automated suite does
+  not currently validate a live MLflow or PostgreSQL service.
 - Every fixed bug gets a regression test.
 
 ## Test Layers
@@ -19,7 +18,7 @@
 |---|---|
 | `ml/validation.py` | File signatures, size/type rejection, delimiter/encoding failures, schema checks, row caps |
 | `ml/profiling.py` | Missing counts, duplicates, numeric/categorical stats, target suggestions |
-| `ml/preprocessing.py` | Numeric/categorical splitting, imputation, unknown-category handling, leakage guard (transform before fit fails) |
+| `ml/preprocessing.py` | Numeric/categorical splitting, missing-value imputation including pandas `pd.NA`, unknown-category handling, leakage guard (transform before fit fails) |
 | `ml/algorithms.py` | Catalog integrity, hyperparameter validation (unknown key, bounds, type) |
 | `ml/training.py` | Classification/regression/clustering execution, metrics presence, determinism, invalid target, reference profile |
 | `ml/drift.py` | PSI identical=0, shifted distribution high, KS sensitivity, categorical PSI, insufficient samples |
@@ -31,8 +30,8 @@
 ### Backend integration (API)
 
 Fixtures: temporary SQLite DB (foreign keys ON), temp artifact root, synchronous job
-execution, MLflow disabled, seeded demo user/project. Tests use `httpx` + FastAPI
-`ASGITransport`.
+execution, MLflow disabled, seeded demo user/project. API tests use Starlette's
+`TestClient` against the FastAPI app.
 
 - Auth: register, login, wrong password, expired/invalid token, duplicate email,
   password policy, rate limit on repeated failures.
@@ -54,6 +53,12 @@ execution, MLflow disabled, seeded demo user/project. Tests use `httpx` + FastAP
   drift with labels, result persistence, threshold effects, timeseries.
 - Retraining: creates a job linked to deployment, uses newer dataset version, never
   auto-promotes; drift-triggered policy creates at most one job per cooldown.
+- Collaboration and alerting: create and accept a role-scoped invitation, update member
+  role, verify workspace audit pagination, and create/update/test/delete a signed alert
+  channel without making an external network request.
+- Advanced deployment workflows: score and download a real batch CSV, explain a real
+  model prediction, configure challenger traffic, and verify dataset-to-deployment
+  lineage.
 - Overview: counts match inserted entities, no invented values.
 
 ### Backend end-to-end
@@ -74,33 +79,31 @@ HTTP endpoints with a real training runner:
 11. Trigger retraining; verify a challenger job completes.
 12. Verify dashboard reflects the data.
 
-SQLite is used for speed; the same test suite is run against PostgreSQL in the compose
-verification job using `DATABASE_URL` overriding the test URL (documented command).
+The automated suite uses SQLite for speed and isolation. PostgreSQL service and migration
+checks are separate deployment checks; the current pytest fixture sets its SQLite URL
+unconditionally.
 
-### Database tests
+### Database validation
 
-- Alembic upgrade from empty on SQLite and PostgreSQL.
-- Unique constraints (dataset name/version, model version, deployment name).
-- FK cascades (delete deployment → predictions/revisions/events/monitoring).
-- Index existence smoke test via SQLAlchemy metadata.
-- JSON round-trip for profiles and monitoring details.
-
+The API tests exercise SQLAlchemy constraints indirectly while using the temporary
+SQLite database. Playwright also applies all Alembic migrations to a fresh SQLite file
+before starting the seeded browser-test server. PostgreSQL migration, FK cascade, and
+explicit index inspection remain part of deployment acceptance, not the automated suite.
 ### Frontend
 
-Vitest + React Testing Library + jsdom:
+The frontend has no component unit-test runner. `npm run e2e` runs three Chromium
+workflows against a temporary SQLite database and a locally started webhook receiver:
 
-- Design primitives: Button variants, Badge tones, EmptyState actions, form error.
-- Formatters: metric formats, durations, relative time, latency.
-- Status badge mapping (job/deployment/drift).
-- API error normalization (envelope → message).
-- A page-level test with mocked `fetch`: loading → data, empty state, error state.
-- Train job form validation (target required, algorithms required).
+- Invitation creation, sign-in redirect, acceptance, and workspace audit filtering.
+- Live prediction, feature explanation, batch CSV scoring/download, and challenger
+  traffic setup.
+- Alert webhook test delivery and project lineage navigation.
 
-ESLint and `tsc --noEmit` are treated as tests in CI.
-
-Browser E2E (Playwright) is documented as a future enhancement; API-level E2E covers
-the functional workflow in CI without browser flake. This is an explicit trade-off.
-
+The test server runs `alembic upgrade head` against a clean database before seeding.
+No external webhook endpoint is called. `npm run lint` (Oxlint), `npm run build`
+(TypeScript checks plus Vite production build), and `npm run screenshots` are the other
+frontend checks. Screenshot automation captures demo artifacts and is separate from
+the browser regression suite.
 ## Commands
 
 ```bash
@@ -110,20 +113,19 @@ the functional workflow in CI without browser flake. This is an explicit trade-o
 ..\.venv\Scripts\ruff format --check app tests
 
 # Frontend (from frontend/)
-npm test
 npm run lint
-npm run typecheck
 npm run build
+npm run e2e
+# With the API and seeded demo running, regenerate screenshot artifacts:
+npm run screenshots
 
 # Full stack
 docker compose up -d --build
-docker compose exec backend python -m pytest -q
 ```
-
 ## Fixtures and Determinism
 
-- Synthetic datasets are generated in code with fixed seeds, not committed large files
-  (except the demo CSV, generated by a deterministic script).
+- The six benchmark CSVs in `demo-data/mock-benchmarks/` are committed and regenerated
+  deterministically from fixed seeds; unit tests also use small in-memory synthetic data.
 - Tests never depend on wall-clock ordering beyond explicit timestamps supplied in the
   fixture or tolerance windows.
 - Drift tests use clearly separated distributions to avoid flakiness; KS p-values are
@@ -140,6 +142,7 @@ docker compose exec backend python -m pytest -q
 ## Not Covered (documented)
 
 - Multi-process concurrency and Celery failure injection.
-- Browser rendering/e2e automation.
+- Exhaustive browser regression coverage. Playwright covers the critical advanced
+  workflows listed above, not every UI state or responsive breakpoint.
 - Load tests beyond a modest smoke script.
 - PyTorch tests run only when torch is installed (`pytest.mark.skipif`).

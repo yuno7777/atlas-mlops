@@ -88,7 +88,11 @@ export function LoginPage() {
     setError(null)
     try {
       await login(email.trim(), password)
-      navigate('/overview', { replace: true })
+      const from = (location.state as { from?: { pathname?: string; search?: string; hash?: string } } | null)?.from
+      const destination = from?.pathname?.startsWith('/') && !from.pathname.startsWith('//')
+        ? `${from.pathname}${from.search ?? ''}${from.hash ?? ''}`
+        : '/overview'
+      navigate(destination, { replace: true })
     } catch (caught) {
       setError(errorMessage(caught))
     } finally {

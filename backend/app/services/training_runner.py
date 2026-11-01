@@ -102,6 +102,28 @@ def _mark_job_failed(db: Session, job: TrainingJob, message: str) -> None:
     db.commit()
 
 
+def _workflow_steps(db: Session, job: TrainingJob, updates: dict[str, tuple[str, str]]) -> None:
+    workflow_id = (job.config or {}).get("workflow_run_id")
+    if not workflow_id:
+        return
+    from app.models.modelops import WorkflowRun
+
+    run = db.get(WorkflowRun, workflow_id)
+    if run is None:
+        return
+    states = [dict(step) for step in (run.step_states or [])]
+    by_id = {step.get("id"): step for step in states}
+    for step_id, (status, detail) in updates.items():
+        step = by_id.get(step_id)
+        if step is not None:
+            step.update(status=status, detail=detail)
+    run.step_states = states
+    run.status = "running"
+    run.started_at = run.started_at or _now()
+    db.add(run)
+    db.commit()
+
+
 def execute_training_job(job_id: str) -> None:
     db = SessionLocal()
     job: TrainingJob | None = None
@@ -125,6 +147,20 @@ def execute_training_job(job_id: str) -> None:
         storage = get_storage()
         with storage.open_path(dataset_version.storage_key) as dataset_path:
             df = read_dataframe(dataset_path, dataset_version.original_filename)
+        _workflow_steps(
+            db,
+            job,
+            {
+                "validate": (
+                    "completed",
+                    f"Validated {len(df):,} rows and {len(df.columns)} columns.",
+                ),
+                "prepare": (
+                    "running",
+                    "Creating a reproducible holdout and preprocessing pipeline.",
+                ),
+            },
+        )
         _log(
             db,
             job,
@@ -140,6 +176,7 @@ def execute_training_job(job_id: str) -> None:
             test_size=float(job.config.get("test_size", 0.2)),
             random_seed=int(job.config.get("random_seed", 42)),
             cv_folds=int(job.config.get("cv_folds", 0)),
+            sensitive_columns=list(job.config.get("sensitive_columns", [])),
         )
         experiments: list[Experiment] = []
         for selection in job.algorithms:
@@ -158,6 +195,7 @@ def execute_training_job(job_id: str) -> None:
                     "test_size": training_config.test_size,
                     "random_seed": training_config.random_seed,
                     "cv_folds": training_config.cv_folds,
+                    "sensitive_columns": training_config.sensitive_columns,
                 },
                 metrics={},
                 status=ExperimentStatus.QUEUED,
@@ -304,6 +342,29 @@ def execute_training_job(job_id: str) -> None:
             )
             return
 
+        _workflow_steps(
+            db,
+            job,
+            {
+                "prepare": ("completed", "Train/test split and preprocessing completed."),
+                "train": ("completed", f"{len(completed_experiments)} model run(s) completed."),
+                "evaluate": (
+                    "completed",
+                    "Held-out and configured cross-validation metrics recorded.",
+                ),
+                "fairness": (
+                    "completed" if training_config.sensitive_columns else "skipped",
+                    "Subgroup metrics recorded with audit columns excluded from model inputs."
+                    if training_config.sensitive_columns
+                    else "No sensitive audit columns were selected.",
+                ),
+                "register": (
+                    "running",
+                    "Checking whether the workflow requested model registration.",
+                ),
+            },
+        )
+
         register_name = job.config.get("register_model_name")
         if register_name:
             best = _resolve_best(completed_experiments, job.problem_type)
@@ -348,6 +409,16 @@ def execute_training_job(job_id: str) -> None:
         )
         TRAINING_JOBS.labels(status="completed").inc()
         db.add(job)
+        _workflow_steps(
+            db,
+            job,
+            {
+                "register": (
+                    "completed",
+                    "Registration step finished; no request is also a valid outcome.",
+                )
+            },
+        )
         db.commit()
     except Exception as exc:
         logger.exception("Training runner crashed", extra={"job_id": job_id})
@@ -368,6 +439,28 @@ def execute_training_job(job_id: str) -> None:
         except Exception:
             logger.exception("Failed to mark crashed job as failed", extra={"job_id": job_id})
     finally:
+        if job is not None and (job.config or {}).get("workflow_run_id"):
+            try:
+                from app.models.modelops import WorkflowRun
+
+                workflow_run = db.get(WorkflowRun, job.config["workflow_run_id"])
+                if workflow_run is not None:
+                    workflow_run.status = str(job.status)
+                    workflow_run.error_message = job.error_message
+                    workflow_run.completed_at = job.completed_at or _now()
+                    step_states = list(workflow_run.step_states or [])
+                    terminal = str(job.status)
+                    for step in step_states:
+                        if step.get("status") in {"queued", "running"}:
+                            step["status"] = (
+                                "completed" if terminal == JobStatus.COMPLETED else terminal
+                            )
+                    workflow_run.step_states = step_states
+                    db.add(workflow_run)
+                    db.commit()
+            except Exception:
+                logger.exception("Could not finalize workflow run", extra={"job_id": job_id})
+                db.rollback()
         with contextlib.suppress(Exception):
             ACTIVE_TRAINING_JOBS.dec()
         db.close()

@@ -42,11 +42,13 @@ class TrainingJobCreateRequest(BaseModel):
     problem_type: Literal["classification", "regression", "clustering"]
     target_column: str | None = Field(default=None, max_length=255)
     feature_columns: list[str] | None = None
+    sensitive_columns: list[str] = Field(default_factory=list, max_length=12)
     algorithms: list[AlgorithmSelection] = Field(min_length=1, max_length=10)
     test_size: float = Field(default=0.2, ge=0.1, le=0.4)
     random_seed: int = Field(default=42, ge=0, le=2_147_483_647)
     cv_folds: int = Field(default=0, ge=0, le=10)
     register_model_name: str | None = Field(default=None, max_length=120)
+    workflow_run_id: str | None = Field(default=None, exclude=True)
 
     @field_validator("feature_columns")
     @classmethod
@@ -58,6 +60,14 @@ class TrainingJobCreateRequest(BaseModel):
             raise ValueError("feature_columns must contain at least one column")
         if len(set(cleaned)) != len(cleaned):
             raise ValueError("feature_columns contains duplicates")
+        return cleaned
+
+    @field_validator("sensitive_columns")
+    @classmethod
+    def unique_sensitive_columns(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value if item.strip()]
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("sensitive_columns contains duplicates")
         return cleaned
 
     @field_validator("target_column")

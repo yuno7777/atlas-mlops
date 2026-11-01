@@ -74,7 +74,7 @@ def _result_out(result: MonitoringResult) -> MonitoringResultOut:
 def _monitoring_samples(
     db: Session, deployment: Deployment, since: datetime
 ) -> list[dict[str, Any]]:
-    logs = DeploymentRepository(db).predictions_since(deployment.id, since)
+    logs = DeploymentRepository(db).predictions_since(deployment.id, since, variant="champion")
     samples = []
     for log in logs:
         prediction = log.prediction
@@ -143,6 +143,9 @@ def analyze_deployment(db: Session, deployment: Deployment) -> MonitoringResult:
                 },
             )
         )
+        from app.services.alerts import dispatch_monitoring_alerts
+
+        dispatch_monitoring_alerts(db, deployment, result)
     return result
 
 
@@ -167,6 +170,9 @@ def run_monitoring(
         ip_address=ip_address,
     )
     db.commit()
+    from app.services.rollouts import advance_active_rollouts
+
+    advance_active_rollouts(db)
     _maybe_auto_retrain(db, deployment, result)
     return _result_out(result)
 
@@ -469,6 +475,19 @@ def scan_active_deployments() -> int:
                     "Scheduled monitoring failed", extra={"deployment_id": deployment.id}
                 )
                 db.rollback()
+        try:
+            from app.services.rollouts import advance_active_rollouts
+
+            advance_active_rollouts(db)
+        except Exception:
+            logger.exception("Progressive rollout evaluation failed")
+            db.rollback()
+        try:
+            from app.services.workflows import process_due_pipeline_runs
+
+            process_due_pipeline_runs()
+        except Exception:
+            logger.exception("Scheduled workflow processing failed")
         return analyzed
     finally:
         db.close()

@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 import time
+import zlib
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -173,6 +174,16 @@ def _features_payload(record: dict[str, Any]) -> dict[str, Any] | None:
     return record
 
 
+def _select_variant(deployment: Deployment, request_id: str) -> tuple[str, ModelVersion]:
+    challenger = deployment.challenger_model_version
+    traffic = int(deployment.challenger_traffic_percent or 0)
+    if challenger is not None and traffic > 0 and challenger.id != deployment.model_version_id:
+        bucket = zlib.crc32(request_id.encode("utf-8")) % 100
+        if bucket < traffic:
+            return "challenger", challenger
+    return "champion", deployment.model_version
+
+
 def _log_failure(
     db: Session,
     deployment: Deployment,
@@ -180,15 +191,19 @@ def _log_failure(
     error: str,
     latency_ms: float,
     record: dict[str, Any] | None = None,
+    *,
+    model_version_id: str | None = None,
+    variant: str = "champion",
 ) -> None:
     db.add(
         PredictionLog(
             deployment_id=deployment.id,
-            model_version_id=deployment.model_version_id,
+            model_version_id=model_version_id or deployment.model_version_id,
             request_id=request_id,
             features=_features_payload(record) if record else None,
             prediction=None,
             status="failed",
+            variant=variant,
             error_message=error[:2000],
             latency_ms=round(latency_ms, 3),
         )
@@ -260,8 +275,9 @@ def predict(
         )
         raise ServiceUnavailableError(message)
 
+    variant, version = _select_variant(deployment, request_id)
     try:
-        loaded = get_model_cache().get_or_load(deployment.model_version)
+        loaded = get_model_cache().get_or_load(version)
         frame = validate_records(payload.records, loaded.reference_profile)
         raw_predictions = run_predictions(loaded.pipeline, loaded.problem_type, frame)
     except Exception as exc:
@@ -275,6 +291,8 @@ def predict(
             error,
             (time.perf_counter() - started) * 1000,
             payload.records[0] if payload.records else None,
+            model_version_id=version.id,
+            variant=variant,
         )
         raise
 
@@ -284,11 +302,12 @@ def predict(
         db.add(
             PredictionLog(
                 deployment_id=deployment.id,
-                model_version_id=deployment.model_version_id,
+                model_version_id=version.id,
                 request_id=request_id,
                 features=_features_payload(record),
                 prediction=prediction,
                 status="success",
+                variant=variant,
                 latency_ms=round(latency_ms, 3),
                 created_at=now,
             )
@@ -305,8 +324,9 @@ def predict(
     return PredictionResponse(
         request_id=request_id,
         deployment_id=deployment.id,
-        model_version_id=deployment.model_version_id,
-        model_version=deployment.model_version.version,
+        model_version_id=version.id,
+        model_version=version.version,
+        variant=variant,
         predictions=[
             PredictionItem(
                 prediction=item.get("prediction"),

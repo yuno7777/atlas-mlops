@@ -15,6 +15,8 @@ import type {
   Timeseries,
 } from '../api/types'
 import { ApiKeyDialog } from '../components/ApiKeyDialog'
+import { BatchPredictionsPanel } from '../components/BatchPredictionsPanel'
+import { ChallengerPanel } from '../components/ChallengerPanel'
 import {
   ChartLegend,
   FeatureDriftList,
@@ -55,7 +57,7 @@ import {
   titleCase,
 } from '../lib/format'
 
-type TabKey = 'overview' | 'test' | 'predictions' | 'revisions' | 'settings'
+type TabKey = 'overview' | 'test' | 'batch' | 'challenger' | 'predictions' | 'revisions' | 'settings'
 
 export function DeploymentDetailPage() {
   const { deploymentId } = useParams<{ deploymentId: string }>()
@@ -361,6 +363,22 @@ export function DeploymentDetailPage() {
         </button>
         <button
           type="button"
+          className={`tab-item ${currentTab === 'batch' ? 'is-active' : ''}`}
+          onClick={() => setTab('batch')}
+        >
+          <Icon name="file" size={15} />
+          Batch scoring
+        </button>
+        <button
+          type="button"
+          className={`tab-item ${currentTab === 'challenger' ? 'is-active' : ''}`}
+          onClick={() => setTab('challenger')}
+        >
+          <Icon name="target" size={15} />
+          Challenger
+        </button>
+        <button
+          type="button"
           className={`tab-item ${currentTab === 'predictions' ? 'is-active' : ''}`}
           onClick={() => setTab('predictions')}
         >
@@ -599,6 +617,15 @@ export function DeploymentDetailPage() {
           deploymentId={d.id}
           modelVersionId={d.model_version_id}
           targetColumn={d.target_column}
+        />
+      ) : null}
+
+      {currentTab === 'batch' ? <BatchPredictionsPanel deploymentId={d.id} /> : null}
+      {currentTab === 'challenger' ? (
+        <ChallengerPanel
+          deploymentId={d.id}
+          modelId={d.registered_model_id}
+          championVersionId={d.model_version_id}
         />
       ) : null}
 

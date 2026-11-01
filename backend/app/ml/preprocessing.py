@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_datetime64_any_dtype, is_numeric_dtype
 from sklearn.compose import ColumnTransformer
@@ -25,7 +26,9 @@ class PreparedFeatures:
 
 def _categorical_series(series: pd.Series) -> pd.Series:
     converted = series.astype("string").str.strip()
-    return converted.mask(converted == "", pd.NA)
+    cleaned = converted.mask(converted == "", pd.NA)
+    # sklearn's SimpleImputer expects numpy.nan, not pandas' scalar pd.NA.
+    return cleaned.astype(object).where(cleaned.notna(), np.nan)
 
 
 def prepare_training_features(features: pd.DataFrame) -> PreparedFeatures:

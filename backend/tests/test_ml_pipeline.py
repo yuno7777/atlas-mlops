@@ -103,6 +103,41 @@ def test_train_classification_and_evaluation():
     assert "feature_cat" in result.reference_profile["features"]
 
 
+def test_train_and_predict_with_missing_categorical_features():
+    rng = np.random.default_rng(412)
+    n = 180
+    category = rng.choice(["basic", "pro", "enterprise"], size=n).astype(object)
+    category[::9] = np.nan
+    numeric = rng.normal(size=n)
+    numeric[::13] = np.nan
+    target = np.where(
+        np.nan_to_num(numeric, nan=0) + np.where(category == "enterprise", 1.2, 0) > 0.15,
+        "yes",
+        "no",
+    )
+    df = pd.DataFrame({"usage_score": numeric, "plan": category, "renewed": target})
+    config = TrainingConfig(
+        problem_type="classification",
+        target_column="renewed",
+        feature_columns=["usage_score", "plan"],
+        test_size=0.2,
+        random_seed=42,
+        cv_folds=3,
+    )
+
+    result = train_algorithm(
+        df,
+        get_algorithm("logistic_regression", "classification"),
+        {},
+        config,
+    )
+
+    assert result.metrics["accuracy"] > 0.65
+    assert result.cv_metrics is not None
+    predictions = result.pipeline.predict(df.loc[:8, ["usage_score", "plan"]])
+    assert len(predictions) == 9
+
+
 def test_train_regression():
     np.random.seed(42)
     n = 100

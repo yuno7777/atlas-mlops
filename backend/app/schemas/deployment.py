@@ -59,6 +59,10 @@ class DeploymentSummary(BaseModel):
     model_version: int
     algorithm: str
     stage: str
+    challenger_model_version_id: str | None = None
+    challenger_model_version: int | None = None
+    challenger_algorithm: str | None = None
+    challenger_traffic_percent: int = 0
     api_key_prefix: str
     description: str | None
     last_request_at: datetime | None
@@ -107,8 +111,43 @@ class PredictionLogOut(BaseModel):
     features: dict[str, Any] | None
     prediction: Any
     status: str
+    variant: str = "champion"
     error_message: str | None
     latency_ms: float
     actual: Any
     actual_received_at: datetime | None
     created_at: datetime
+
+
+class ChallengerUpdateRequest(BaseModel):
+    model_version_id: str
+    traffic_percent: int = Field(default=10, ge=1, le=80)
+
+
+class ChallengerTrafficRequest(BaseModel):
+    traffic_percent: int = Field(ge=0, le=80)
+
+
+class ChallengerVariantStats(BaseModel):
+    variant: str
+    model_version_id: str
+    model_version: int | None = None
+    algorithm: str | None = None
+    predictions: int
+    failures: int
+    labeled: int
+    accuracy: float | None = None
+    avg_latency_ms: float = 0.0
+    last_prediction_at: datetime | None = None
+
+
+class ChallengerInfoResponse(BaseModel):
+    deployment_id: str
+    champion_version_id: str
+    champion_version: int
+    champion_algorithm: str
+    challenger_version_id: str | None = None
+    challenger_version: int | None = None
+    challenger_algorithm: str | None = None
+    traffic_percent: int = 0
+    variants: list[ChallengerVariantStats]

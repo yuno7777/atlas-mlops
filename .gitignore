@@ -30,6 +30,8 @@ venv.bak/
 node_modules/
 frontend/dist/
 frontend/dist-ssr/
+frontend/playwright-report/
+frontend/test-results/
 *.local
 
 # Testing & Coverage

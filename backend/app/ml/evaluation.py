@@ -109,6 +109,91 @@ def evaluate_regression(model, X_test, y_test) -> dict[str, float | None]:
     }
 
 
+def evaluate_fairness(y_true, y_pred, sensitive, problem_type: str, classes) -> dict:
+    """Summarize held-out performance by audit group; sensitive columns are never model inputs."""
+    if sensitive is None or sensitive.empty:
+        return {"status": "not_available", "reason": "No sensitive columns were selected."}
+    if len(sensitive) != len(y_true):
+        return {"status": "not_available", "reason": "Audit rows do not match evaluation rows."}
+
+    groups: dict[str, dict] = {}
+    for column in sensitive.columns:
+        values = sensitive[column].astype("string").fillna("<missing>")
+        by_group: dict[str, dict] = {}
+        selection_rates: list[float] = []
+        accuracies: list[float] = []
+        errors: list[float] = []
+        for group in sorted(values.unique().tolist()):
+            mask = values.to_numpy() == group
+            count = int(mask.sum())
+            if count == 0:
+                continue
+            group_true = np.asarray(y_true)[mask]
+            group_pred = np.asarray(y_pred)[mask]
+            item: dict[str, float | int] = {"samples": count}
+            if problem_type == "classification":
+                positive = classes[-1] if classes is not None and len(classes) == 2 else None
+                item["accuracy"] = float(accuracy_score(group_true, group_pred))
+                if positive is not None:
+                    selection = float(np.mean(group_pred == positive))
+                    item["selection_rate"] = selection
+                    selection_rates.append(selection)
+                    positives = group_true == positive
+                    negatives = ~positives
+                    item["true_positive_rate"] = (
+                        float(np.mean(group_pred[positives] == positive))
+                        if positives.any()
+                        else 0.0
+                    )
+                    item["false_positive_rate"] = (
+                        float(np.mean(group_pred[negatives] == positive))
+                        if negatives.any()
+                        else 0.0
+                    )
+                accuracies.append(float(item["accuracy"]))
+            else:
+                residual = np.asarray(group_true, dtype=float) - np.asarray(group_pred, dtype=float)
+                item["mae"] = float(np.mean(np.abs(residual)))
+                item["rmse"] = float(np.sqrt(np.mean(np.square(residual))))
+                errors.append(float(item["mae"]))
+            by_group[str(group)] = item
+        report: dict[str, object] = {
+            "groups": by_group,
+            "group_count": len(by_group),
+            "smallest_group_samples": min(
+                (int(item["samples"]) for item in by_group.values()), default=0
+            ),
+        }
+        if problem_type == "classification":
+            report["positive_class"] = (
+                str(classes[-1]) if classes is not None and len(classes) == 2 else None
+            )
+            report["selection_rate_gap"] = (
+                round(max(selection_rates) - min(selection_rates), 6)
+                if len(selection_rates) > 1
+                else None
+            )
+            report["accuracy_gap"] = (
+                round(max(accuracies) - min(accuracies), 6) if len(accuracies) > 1 else None
+            )
+        else:
+            report["mae_gap"] = round(max(errors) - min(errors), 6) if len(errors) > 1 else None
+        groups[column] = report
+
+    return {
+        "status": "evaluated",
+        "method": "held-out subgroup metrics",
+        "sensitive_columns": list(sensitive.columns),
+        "notes": [
+            "Group metrics are descriptive, not proof of fairness.",
+            "For classification, selection-rate and TPR/FPR metrics use the final class only for binary targets.",
+            "Small groups can produce unstable estimates; inspect group sample counts.",
+        ],
+        "features_excluded": list(sensitive.columns),
+        "columns": groups,
+    }
+
+
 def evaluate_clustering(preprocessor, clusterer, X_test) -> dict[str, float | None]:
     try:
         transformed = preprocessor.transform(X_test)

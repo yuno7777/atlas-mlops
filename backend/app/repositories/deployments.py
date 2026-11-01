@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.deployment import (
@@ -25,6 +25,9 @@ class DeploymentRepository:
                 select(Deployment)
                 .options(
                     joinedload(Deployment.model_version).joinedload(ModelVersion.registered_model),
+                    joinedload(Deployment.challenger_model_version).joinedload(
+                        ModelVersion.registered_model
+                    ),
                     joinedload(Deployment.registered_model),
                 )
                 .where(Deployment.id == deployment_id)
@@ -39,6 +42,9 @@ class DeploymentRepository:
                 select(Deployment)
                 .options(
                     joinedload(Deployment.model_version).joinedload(ModelVersion.registered_model),
+                    joinedload(Deployment.challenger_model_version).joinedload(
+                        ModelVersion.registered_model
+                    ),
                     joinedload(Deployment.registered_model),
                     selectinload(Deployment.revisions).joinedload(DeploymentRevision.model_version),
                     selectinload(Deployment.events),
@@ -66,6 +72,9 @@ class DeploymentRepository:
                 select(Deployment)
                 .options(
                     joinedload(Deployment.model_version).joinedload(ModelVersion.registered_model),
+                    joinedload(Deployment.challenger_model_version).joinedload(
+                        ModelVersion.registered_model
+                    ),
                     joinedload(Deployment.registered_model),
                 )
                 .where(*filters)
@@ -156,19 +165,56 @@ class DeploymentRepository:
         )
         return items, total
 
-    def predictions_since(self, deployment_id: str, since: datetime) -> list[PredictionLog]:
+    def predictions_since(
+        self,
+        deployment_id: str,
+        since: datetime,
+        *,
+        variant: str | None = None,
+        model_version_id: str | None = None,
+    ) -> list[PredictionLog]:
+        filters = [
+            PredictionLog.deployment_id == deployment_id,
+            PredictionLog.created_at >= since,
+        ]
+        if variant:
+            filters.append(PredictionLog.variant == variant)
+        if model_version_id:
+            filters.append(PredictionLog.model_version_id == model_version_id)
         return list(
             self.db.execute(
-                select(PredictionLog)
-                .where(
-                    PredictionLog.deployment_id == deployment_id,
-                    PredictionLog.created_at >= since,
-                )
-                .order_by(PredictionLog.created_at.asc())
+                select(PredictionLog).where(*filters).order_by(PredictionLog.created_at.asc())
             )
             .scalars()
             .all()
         )
+
+    def variant_overview(self, deployment_id: str) -> list[dict]:
+        rows = self.db.execute(
+            select(
+                PredictionLog.variant,
+                PredictionLog.model_version_id,
+                func.count(PredictionLog.id),
+                func.sum(case((PredictionLog.status == "failed", 1), else_=0)),
+                func.sum(case((PredictionLog.actual.is_not(None), 1), else_=0)),
+                func.avg(PredictionLog.latency_ms),
+                func.max(PredictionLog.created_at),
+            )
+            .where(PredictionLog.deployment_id == deployment_id)
+            .group_by(PredictionLog.variant, PredictionLog.model_version_id)
+        ).all()
+        return [
+            {
+                "variant": row[0],
+                "model_version_id": row[1],
+                "predictions": int(row[2] or 0),
+                "failures": int(row[3] or 0),
+                "labeled": int(row[4] or 0),
+                "avg_latency_ms": float(row[5] or 0.0),
+                "last_prediction_at": row[6],
+            }
+            for row in rows
+        ]
 
     def get_prediction(self, prediction_id: str) -> PredictionLog | None:
         return self.db.get(PredictionLog, prediction_id)

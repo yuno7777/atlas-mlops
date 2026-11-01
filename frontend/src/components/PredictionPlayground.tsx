@@ -3,6 +3,7 @@ import { api } from '../api/client'
 import { useApi } from '../api/hooks'
 import type {
   DatasetColumn,
+  ExplanationResponse,
   ExperimentDetail,
   ModelVersion,
   PredictionResponse,
@@ -63,6 +64,9 @@ export function PredictionPlayground({
 
   const [values, setValues] = useState<Record<string, string>>({})
   const [result, setResult] = useState<PredictionResponse | null>(null)
+  const [inputRecord, setInputRecord] = useState<Record<string, unknown> | null>(null)
+  const [explanation, setExplanation] = useState<ExplanationResponse | null>(null)
+  const [explaining, setExplaining] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -101,11 +105,26 @@ export function PredictionPlayground({
         { records: [record] },
       )
       setResult(response)
+      setInputRecord(record)
+      setExplanation(null)
       toast.success('Prediction returned and logged.')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Prediction failed.')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const explain = async () => {
+    if (!inputRecord) return
+    setExplaining(true)
+    setError(null)
+    try {
+      setExplanation(await api.post<ExplanationResponse>(`/deployments/${deploymentId}/explain`, { record: inputRecord }))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not explain this prediction.')
+    } finally {
+      setExplaining(false)
     }
   }
 
@@ -236,6 +255,7 @@ export function PredictionPlayground({
               <div className="prediction-value">{String(result.predictions[0]?.prediction)}</div>
               <div className="prediction-meta">
                 <span>v{result.model_version}</span>
+                {result.variant ? <><span className="meta-separator">/</span><span>{result.variant}</span></> : null}
                 <span className="meta-separator">/</span>
                 <span>{formatNumber(result.latency_ms, 1)} ms</span>
                 <span className="meta-separator">/</span>
@@ -260,6 +280,13 @@ export function PredictionPlayground({
                     ))}
                 </div>
               ) : null}
+              <div className="form-actions">
+                <button type="button" className="btn btn-secondary btn-sm" disabled={explaining} onClick={() => void explain()}>
+                  <Icon name="activity" size={14} />
+                  {explaining ? 'Calculating contributions…' : explanation ? 'Recalculate explanation' : 'Explain this prediction'}
+                </button>
+                {explanation ? <span className="muted">{explanation.method.replaceAll('_', ' ')} · {formatNumber(explanation.latency_ms, 1)} ms</span> : null}
+              </div>
               {result.warnings.length ? (
                 <div className="inline-notice inline-notice-warning">
                   <Icon name="alert-triangle" size={15} />
@@ -267,6 +294,14 @@ export function PredictionPlayground({
                 </div>
               ) : null}
             </Panel>
+            {explanation ? <Panel>
+              <SectionHeader title="Feature contributions" description={`Baseline ${formatNumber(explanation.baseline, 3)} · prediction ${formatNumber(explanation.prediction, 3)} · ${explanation.background_samples} background rows`} />
+              <div className="explanation-list">{[...explanation.contributions].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution)).map((item) => {
+                const maximum = Math.max(0.000001, ...explanation.contributions.map((entry) => Math.abs(entry.contribution)))
+                return <div className="explanation-row" key={item.feature}><div className="explanation-label"><strong className="mono">{item.feature}</strong><span className="muted">{String(item.value ?? 'missing')}</span></div><div className="explanation-track"><span className={item.contribution >= 0 ? 'is-positive' : 'is-negative'} style={{ width: `${Math.max(2, Math.abs(item.contribution) / maximum * 100)}%` }} /></div><strong className={`num ${item.contribution >= 0 ? 'text-positive' : 'text-negative'}`}>{item.contribution >= 0 ? '+' : ''}{formatNumber(item.contribution, 4)}</strong></div>
+              })}</div>
+              <p className="panel-note">Monte Carlo permutation Shapley values estimate how each feature shifts this model score from the training reference baseline. They describe model behavior, not causal effects.</p>
+            </Panel> : null}
             <Panel>
               <SectionHeader title="How to use this response" />
               <p className="panel-note">

@@ -23,11 +23,11 @@ jobs:
 
       - name: Run Ruff Linter
         working-directory: backend
-        run: ruff check app tests
+        run: ruff check app tests e2e_server.py
 
       - name: Run Ruff Formatter Check
         working-directory: backend
-        run: ruff format --check app tests
+        run: ruff format --check app tests e2e_server.py
 
   backend-tests:
     name: Backend Test Suite
@@ -79,6 +79,50 @@ jobs:
       - name: Build & Typecheck Frontend
         working-directory: frontend
         run: npm run build
+
+  browser-e2e:
+    name: Browser End-to-End Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser end-to-end suite
+        working-directory: frontend
+        env:
+          CI: "true"
+        run: npm run e2e
 
   docker-validate:
     name: Validate Docker Build & Compose Config

@@ -21,6 +21,9 @@ import { NewDeploymentPage } from './pages/NewDeploymentPage'
 import { DeploymentDetailPage } from './pages/DeploymentDetailPage'
 import { MonitoringPage } from './pages/MonitoringPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { InvitePage } from './pages/InvitePage'
+import { LineagePage } from './pages/LineagePage'
+import { BenchmarksPage } from './pages/BenchmarksPage'
 import { LoadingBlock } from './components/ui'
 
 function ProtectedLayout() {
@@ -48,8 +51,15 @@ function ProtectedLayout() {
 
 function PublicAuthRoute({ children }: { children: ReactNode }) {
   const { user, ready } = useAuth()
+  const location = useLocation()
   if (!ready) return null
-  if (user) return <Navigate to="/overview" replace />
+  if (user) {
+    const from = (location.state as { from?: { pathname?: string; search?: string; hash?: string } } | null)?.from
+    const destination = from?.pathname?.startsWith('/') && !from.pathname.startsWith('//')
+      ? `${from.pathname}${from.search ?? ''}${from.hash ?? ''}`
+      : '/overview'
+    return <Navigate to={destination} replace />
+  }
   return <>{children}</>
 }
 
@@ -95,6 +105,9 @@ export default function App() {
               <Route path="/deployments/new" element={<NewDeploymentPage />} />
               <Route path="/deployments/:deploymentId" element={<DeploymentDetailPage />} />
               <Route path="/monitoring" element={<MonitoringPage />} />
+              <Route path="/benchmarks" element={<BenchmarksPage />} />
+              <Route path="/lineage" element={<LineagePage />} />
+              <Route path="/invite/:token" element={<InvitePage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/overview" replace />} />
             </Route>

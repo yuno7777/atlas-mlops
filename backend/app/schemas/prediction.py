@@ -19,6 +19,7 @@ class PredictionResponse(BaseModel):
     deployment_id: str
     model_version_id: str
     model_version: int
+    variant: str = "champion"
     predictions: list[PredictionItem]
     latency_ms: float
     warnings: list[str] = Field(default_factory=list)

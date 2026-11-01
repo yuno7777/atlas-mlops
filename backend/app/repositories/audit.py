@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.audit import AuditEvent
@@ -39,3 +39,31 @@ class AuditRepository:
             .limit(limit)
         ).all()
         return [(event, email) for event, email in rows]
+
+    def list_for_workspace(
+        self,
+        workspace_id: str,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+        action: str | None = None,
+        project_id: str | None = None,
+        user_id: str | None = None,
+    ) -> tuple[list[tuple[AuditEvent, str | None]], int]:
+        filters = [AuditEvent.workspace_id == workspace_id]
+        if action:
+            filters.append(AuditEvent.action == action)
+        if project_id:
+            filters.append(AuditEvent.project_id == project_id)
+        if user_id:
+            filters.append(AuditEvent.user_id == user_id)
+        total = self.db.execute(select(func.count(AuditEvent.id)).where(*filters)).scalar_one()
+        rows = self.db.execute(
+            select(AuditEvent, User.email)
+            .outerjoin(User, User.id == AuditEvent.user_id)
+            .where(*filters)
+            .order_by(AuditEvent.id.desc())
+            .offset(offset)
+            .limit(limit)
+        ).all()
+        return [(event, email) for event, email in rows], int(total or 0)

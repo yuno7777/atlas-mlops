@@ -15,6 +15,8 @@ const projectNav: { to: string; label: string; icon: IconName; end?: boolean }[]
   { to: '/models', label: 'Models', icon: 'cube' },
   { to: '/deployments', label: 'Deployments', icon: 'rocket' },
   { to: '/monitoring', label: 'Monitoring', icon: 'chart' },
+  { to: '/benchmarks', label: 'Benchmarks', icon: 'flask' },
+  { to: '/lineage', label: 'Lineage', icon: 'git-branch' },
 ]
 
 const workspaceNav: { to: string; label: string; icon: IconName }[] = [

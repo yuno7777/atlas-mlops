@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, File, Query, Response, UploadFile, status
 
 from app.api.deps import ClientIP, CurrentUser, Database, page_payload
+from app.schemas.batch import BatchPredictionOut
 from app.schemas.common import Page
 from app.schemas.deployment import (
+    ChallengerInfoResponse,
+    ChallengerTrafficRequest,
+    ChallengerUpdateRequest,
     DeploymentCreated,
     DeploymentCreateRequest,
     DeploymentDetail,
@@ -17,6 +21,8 @@ from app.schemas.deployment import (
     PredictionLogOut,
     RotateKeyResponse,
 )
+from app.schemas.explanation import ExplanationRequest, ExplanationResponse
+from app.schemas.modelops import RolloutResponse, RolloutStartRequest
 from app.schemas.monitoring import (
     MonitoringResultOut,
     RetrainComparisonResponse,
@@ -24,8 +30,12 @@ from app.schemas.monitoring import (
     TimeseriesResponse,
 )
 from app.schemas.training import TrainingJobDetail
+from app.services import batch as batch_service
+from app.services import challenger as challenger_service
 from app.services import deployments as deployment_service
 from app.services import monitoring as monitoring_service
+from app.services.explanation import explain_deployment_prediction
+from app.services.rollouts import cancel_rollout, get_rollout, start_rollout
 
 router = APIRouter(tags=["Deployments"])
 
@@ -102,6 +112,165 @@ def rotate_api_key(
     deployment_id: str, db: Database, user: CurrentUser, ip_address: ClientIP
 ) -> RotateKeyResponse:
     return deployment_service.rotate_api_key(db, user, deployment_id, ip_address)
+
+
+@router.get(
+    "/deployments/{deployment_id}/challenger",
+    response_model=ChallengerInfoResponse,
+)
+def challenger_info(deployment_id: str, db: Database, user: CurrentUser) -> ChallengerInfoResponse:
+    return challenger_service.get_challenger(db, user, deployment_id)
+
+
+@router.put(
+    "/deployments/{deployment_id}/challenger",
+    response_model=ChallengerInfoResponse,
+)
+def set_challenger(
+    deployment_id: str,
+    payload: ChallengerUpdateRequest,
+    db: Database,
+    user: CurrentUser,
+    ip_address: ClientIP,
+) -> ChallengerInfoResponse:
+    return challenger_service.set_challenger(db, user, deployment_id, payload, ip_address)
+
+
+@router.patch(
+    "/deployments/{deployment_id}/challenger",
+    response_model=ChallengerInfoResponse,
+)
+def update_challenger_traffic(
+    deployment_id: str,
+    payload: ChallengerTrafficRequest,
+    db: Database,
+    user: CurrentUser,
+    ip_address: ClientIP,
+) -> ChallengerInfoResponse:
+    return challenger_service.update_traffic(db, user, deployment_id, payload, ip_address)
+
+
+@router.delete(
+    "/deployments/{deployment_id}/challenger",
+    response_model=ChallengerInfoResponse,
+)
+def clear_challenger(
+    deployment_id: str, db: Database, user: CurrentUser, ip_address: ClientIP
+) -> ChallengerInfoResponse:
+    return challenger_service.clear_challenger(db, user, deployment_id, ip_address)
+
+
+@router.post(
+    "/deployments/{deployment_id}/challenger/promote",
+    response_model=ChallengerInfoResponse,
+)
+def promote_challenger(
+    deployment_id: str, db: Database, user: CurrentUser, ip_address: ClientIP
+) -> ChallengerInfoResponse:
+    return challenger_service.promote_challenger(db, user, deployment_id, ip_address)
+
+
+@router.post(
+    "/deployments/{deployment_id}/challenger/reject",
+    response_model=ChallengerInfoResponse,
+)
+def reject_challenger(
+    deployment_id: str, db: Database, user: CurrentUser, ip_address: ClientIP
+) -> ChallengerInfoResponse:
+    return challenger_service.clear_challenger(
+        db, user, deployment_id, ip_address, reason="rejected"
+    )
+
+
+@router.get("/deployments/{deployment_id}/rollout", response_model=RolloutResponse | None)
+def get_deployment_rollout(
+    deployment_id: str, db: Database, user: CurrentUser
+) -> RolloutResponse | None:
+    return get_rollout(db, user, deployment_id)
+
+
+@router.post("/deployments/{deployment_id}/rollout", response_model=RolloutResponse)
+def start_deployment_rollout(
+    deployment_id: str,
+    payload: RolloutStartRequest,
+    db: Database,
+    user: CurrentUser,
+    ip_address: ClientIP,
+) -> RolloutResponse:
+    return start_rollout(db, user, deployment_id, payload, ip_address)
+
+
+@router.post("/deployments/{deployment_id}/rollout/cancel", response_model=RolloutResponse)
+def cancel_deployment_rollout(
+    deployment_id: str, db: Database, user: CurrentUser, ip_address: ClientIP
+) -> RolloutResponse:
+    return cancel_rollout(db, user, deployment_id, ip_address)
+
+
+@router.post(
+    "/deployments/{deployment_id}/batch-predictions",
+    response_model=BatchPredictionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_batch_prediction(
+    deployment_id: str,
+    db: Database,
+    user: CurrentUser,
+    ip_address: ClientIP,
+    file: UploadFile = File(...),
+) -> BatchPredictionOut:
+    return batch_service.create_batch_prediction(
+        db, user, deployment_id, file.file, file.filename or "batch.csv", ip_address
+    )
+
+
+@router.get(
+    "/deployments/{deployment_id}/batch-predictions",
+    response_model=list[BatchPredictionOut],
+)
+def list_batch_predictions(
+    deployment_id: str,
+    db: Database,
+    user: CurrentUser,
+    limit: int = Query(default=25, ge=1, le=100),
+) -> list[BatchPredictionOut]:
+    return batch_service.list_batch_predictions(db, user, deployment_id, limit)
+
+
+@router.get(
+    "/deployments/{deployment_id}/batch-predictions/{batch_id}",
+    response_model=BatchPredictionOut,
+)
+def get_batch_prediction(
+    deployment_id: str, batch_id: str, db: Database, user: CurrentUser
+) -> BatchPredictionOut:
+    return batch_service.get_batch_prediction(db, user, deployment_id, batch_id)
+
+
+@router.get("/deployments/{deployment_id}/batch-predictions/{batch_id}/download")
+def download_batch_prediction(
+    deployment_id: str, batch_id: str, db: Database, user: CurrentUser
+) -> Response:
+    batch, content = batch_service.batch_download(db, user, deployment_id, batch_id)
+    filename = f"predictions-{batch.id[:8]}.csv"
+    return Response(
+        content=content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post(
+    "/deployments/{deployment_id}/explain",
+    response_model=ExplanationResponse,
+)
+def explain_prediction(
+    deployment_id: str,
+    payload: ExplanationRequest,
+    db: Database,
+    user: CurrentUser,
+) -> ExplanationResponse:
+    return explain_deployment_prediction(db, user, deployment_id, payload.record)
 
 
 @router.get("/deployments/{deployment_id}/health", response_model=DeploymentHealthResponse)

@@ -93,7 +93,14 @@ Key variables:
 | `ENABLE_MONITORING_SCHEDULER` | false (api), true (beat) | Periodic scans |
 | `CORS_ORIGINS` | http://localhost:3000 | Allowed origins |
 | `RATE_LIMIT_PREDICTIONS_PER_MINUTE` | 120 | Per-deployment |
+| `OTEL_SERVICE_NAME` | atlas-api | OpenTelemetry resource service name |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | blank | Optional OTLP/HTTP collector base URL; blank disables trace export |
 | `LOG_LEVEL` | INFO | |
+
+When an OTLP endpoint is configured, the API exports request spans and accepts W3C
+`traceparent` context. The Monitoring view's SLO snapshot uses the process-local
+Prometheus registry and resets on API restart; durable multi-process SLO history needs
+a Prometheus server or remote metrics backend.
 
 Secrets are never baked into images. Compose reads `.env`; Kubernetes/ECS should use a
 secret manager. Rotate `SECRET_KEY` invalidates existing tokens; rotate deployment API

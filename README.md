@@ -26,6 +26,13 @@ Atlas provides a complete machine learning lifecycle stack in a single deployabl
 - **Model Registry & Stage Gates:** Maintain strict model versioning with explicit lifecycle stage transitions (`none` -> `staging` -> `production` -> `archived`).
 - **Low-Latency Inference Server:** Serve predictions through FastAPI endpoints protected by hashed API keys, backed by a thread-safe LRU model cache with automatic invalidation.
 - **Continuous Drift Detection:** Track incoming feature distributions with Population Stability Index (PSI) and two-sample Kolmogorov-Smirnov (KS) tests to trigger automated challenger retraining before accuracy degrades.
+- **Batch Scoring & Explanations:** Score CSV uploads through a deployment, download the result file, and inspect per-record permutation Shapley contributions.
+- **Controlled Champion/Challenger Traffic:** Route a configurable share of prediction requests to a second version of the same registered model and compare variants before promotion.
+- **Workspace Collaboration & Lineage:** Invite members with roles, audit workspace changes, configure signed alert webhooks, and trace datasets through deployed versions.
+- **Gated Progressive Releases:** Increase challenger traffic in stages with sample, error, latency, and labeled-quality gates; failed stages roll back to the champion.
+- **Fairness & Model Cards:** Audit held-out subgroup metrics while keeping sensitive columns out of model features; export provenance-rich JSON or Markdown cards.
+- **Benchmark Lab & Pipelines:** Run reusable classification, regression, and clustering recipes with fixed seeds, cross-validation, timing, caching, and retry history.
+- **Tracing & SLOs:** Export request traces over OTLP/HTTP and inspect API availability and latency objectives from Monitoring.
 
 ---
 
@@ -96,7 +103,7 @@ Monitor live feature distributions, output score shift, and statistical drift al
 | **Experiment Tracking** | MLflow |
 | **Frontend** | React 19, TypeScript, Vite, custom dark token design system |
 | **Storage & DB** | PostgreSQL, SQLite (testing), Local filesystem / AWS S3 |
-| **DevOps & QA** | Docker Compose, Pytest, Ruff, Oxlint |
+| **DevOps & QA** | Docker Compose, Pytest, Playwright, Ruff, Oxlint |
 
 ---
 
@@ -177,9 +184,52 @@ The UI will be accessible at [http://127.0.0.1:5173](http://127.0.0.1:5173). Req
 
 ---
 
+## Synthetic Model Benchmarks
+
+The repository includes six reproducible synthetic datasets with 3,000 rows each:
+SaaS churn, loan repayment risk, e-commerce conversion, retail demand, delivery ETA,
+and used vehicle prices. Three are classification tasks and three are regression
+tasks. Their feature columns include a small, intentional amount of missing data to
+exercise Atlas preprocessing. Training fits numeric median imputation and scaling,
+plus categorical most-frequent imputation and one-hot encoding within each split.
+
+After starting Atlas and seeding the demo account, generate, upload, and train them
+from the repository root:
+
+```bash
+python demo-data/generate_mock_datasets.py
+python demo-data/run_mock_benchmarks.py
+```
+
+The workflow creates a `Synthetic Model Benchmarks` project, runs two algorithms per
+dataset with an 80/20 holdout and 3-fold cross-validation, and compares each pair of
+experiments. Dataset descriptions, preprocessing notes, and the resulting metrics are
+in [demo-data/mock-benchmarks](demo-data/mock-benchmarks/README.md). The data is
+synthetic and intended for pipeline testing, not production decisions.
+
+### Popular model and pipeline recipes
+
+The authenticated **Benchmark Lab** page offers reusable recipes for common tabular
+baselines:
+
+| Recipe | Popular models | Main comparison metrics |
+|---|---|---|
+| Classification baselines | Logistic Regression, Random Forest, Gradient Boosting | Accuracy, weighted F1, ROC AUC |
+| Imbalanced classification | Class-weighted Logistic Regression, Random Forest, Gradient Boosting | Weighted F1, ROC AUC, accuracy |
+| Regression baselines | Linear Regression, Ridge, Random Forest, Gradient Boosting | R-squared, RMSE, MAE |
+| Small-data regression | Ridge, constrained Random Forest, Gradient Boosting | R-squared, RMSE, MAE |
+| Clustering baseline | K-Means | Silhouette, Davies-Bouldin, Calinski-Harabasz |
+
+Supervised runs compare models on the same dataset version and seeded holdout, with
+cross-validation computed on the training partition. The page records CV mean and
+spread, held-out metrics, training time, subgroup fairness results when requested, and
+the full pipeline attempt history. The API contract and generated synthetic results
+are documented in [docs/API_SPECIFICATION.md](docs/API_SPECIFICATION.md) and
+[demo-data/mock-benchmarks](demo-data/mock-benchmarks/README.md).
+
 ## Testing & Code Quality
 
-Atlas includes full test coverage across dataset validation, asynchronous model training, deployment serving, model caching, and statistical drift calculation.
+Automated checks cover dataset validation, training and serving workflows, drift calculations, collaboration, batch scoring, explanations, challenger routing, alert delivery, and lineage.
 
 ### Backend Tests
 
@@ -188,7 +238,17 @@ cd backend
 python -m pytest -v
 ```
 
-All 18 test suites run against an isolated SQLite test database and complete in seconds.
+All 20 backend tests run against an isolated SQLite test database and complete in seconds.
+
+### Browser End-to-End Tests
+
+```bash
+cd frontend
+npm ci
+npm run e2e
+```
+
+The Playwright suite starts the API and Vite app on isolated ports, creates a temporary SQLite database, applies Alembic migrations, and seeds the Customer Churn project. It exercises invitation acceptance, workspace audit filtering, live prediction and explanation, batch scoring, challenger setup, webhook delivery, and lineage navigation.
 
 ### Linting & Formatting
 

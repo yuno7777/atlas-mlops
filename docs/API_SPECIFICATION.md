@@ -34,6 +34,7 @@ OpenAPI: `GET /api/v1/openapi.json`, Swagger UI at `/api/v1/docs`, ReDoc at
 | GET | `/metrics` | none (network-scoped) | Prometheus text format |
 | GET | `/api/v1/health` | none | API health with version |
 | GET | `/api/v1/system/info` | JWT | Versions, execution mode, artifact backend, MLflow status |
+| GET | `/api/v1/system/slo` | JWT | Process-lifetime availability and latency SLO snapshot, plus trace-export configuration |
 
 ## Authentication
 
@@ -64,11 +65,24 @@ Login response:
 |---|---|---|
 | GET | `/workspaces` | Workspaces for current user, with role |
 | GET | `/workspaces/{id}/members` | Members (name, email, role) |
+| PATCH | `/workspaces/{id}/members/{user_id}` | Change a member role (`admin`+) |
+| DELETE | `/workspaces/{id}/members/{user_id}` | Remove a member (`admin`+) |
+| GET | `/workspaces/{id}/invites` | List workspace invitations (`admin`+) |
+| POST | `/workspaces/{id}/invites` | Invite an email with a workspace role (`admin`+) |
+| DELETE | `/workspaces/{id}/invites/{invite_id}` | Revoke a pending invite (`admin`+) |
+| GET | `/invites/{token}` | Preview an invite issued to the current user |
+| POST | `/invites/{token}/accept` | Accept an invite issued to the current user |
+| GET | `/workspaces/{id}/audit-events` | Paginated workspace audit trail (`admin`+) |
 | GET | `/workspaces/{id}/projects` | Projects in workspace |
 | POST | `/workspaces/{id}/projects` | Create project (`admin`+) |
 | GET | `/projects/{id}` | Project detail |
 | GET | `/projects/{id}/overview` | Dashboard aggregate |
 | GET | `/projects/{id}/audit-events` | Recent audit trail |
+| GET | `/projects/{id}/lineage` | Dataset-to-deployment lineage graph |
+
+Invite creation returns a one-time token and `/invite/{token}` URL. Only the invited
+email can preview and accept the invitation. The raw token is not stored; only its hash
+is persisted. Workspace audit pagination uses `offset` and `limit`.
 
 ## Datasets
 
@@ -131,6 +145,7 @@ Create request:
   "problem_type": "classification",
   "target_column": "churn",
   "feature_columns": null,
+  "sensitive_columns": ["region"],
   "algorithms": [
     {"algorithm": "logistic_regression", "hyperparameters": {"C": 1.0, "max_iter": 500}},
     {"algorithm": "random_forest_classifier", "hyperparameters": {"n_estimators": 200}}
@@ -142,6 +157,9 @@ Create request:
 ```
 
 Rules: target required for classification/regression; target excluded from features;
+optional `sensitive_columns` are excluded from the default feature set, cannot overlap
+explicit feature columns, and are used for subgroup fairness metrics on the held-out
+evaluation split;
 minimum 2 feature columns after exclusion; algorithms must support the problem type;
 hyperparameters are validated against the catalog; job names default to a timestamped
 label. Returns `202` with the job.
@@ -176,6 +194,8 @@ returned.
 | POST | `/model-versions/{id}/promote` | Set stage (`staging`, `production`, `none`) |
 | POST | `/model-versions/{id}/archive` | Archive |
 | GET | `/model-versions/{id}` | Version detail |
+| GET | `/model-versions/{id}/card` | Generated JSON model card with evaluation, data, fairness, limitations, monitoring, and provenance |
+| GET | `/model-versions/{id}/card.md` | Download the same model card as Markdown |
 | GET | `/model-versions/{id}/download` | Stream artifact (audited) |
 | POST | `/models/{id}/versions/compare` | Compare 2–6 versions |
 
@@ -194,6 +214,20 @@ Promotion is independent of deployment; deploying pins a specific version.
 | POST | `/deployments/{id}/start` | Activate/verify artifact |
 | POST | `/deployments/{id}/rollback` | Activate previous revision |
 | POST | `/deployments/{id}/rotate-key` | New API key (returned once) |
+| GET | `/deployments/{id}/challenger` | Current champion/challenger versions and variant statistics |
+| PUT | `/deployments/{id}/challenger` | Assign another version of the same registered model as challenger |
+| PATCH | `/deployments/{id}/challenger` | Change challenger traffic share (0 to 80%) |
+| DELETE | `/deployments/{id}/challenger` | Clear the challenger |
+| POST | `/deployments/{id}/challenger/promote` | Promote challenger to champion |
+| POST | `/deployments/{id}/challenger/reject` | Reject and clear the challenger |
+| GET | `/deployments/{id}/rollout` | Latest progressive rollout and current gate evidence |
+| POST | `/deployments/{id}/rollout` | Start a gated rollout for the challenger or supplied model version |
+| POST | `/deployments/{id}/rollout/cancel` | Stop an active rollout and return traffic to the champion |
+| POST | `/deployments/{id}/batch-predictions` | Score an uploaded CSV and store result CSV |
+| GET | `/deployments/{id}/batch-predictions` | List batch prediction jobs |
+| GET | `/deployments/{id}/batch-predictions/{batch_id}` | Batch status and output preview |
+| GET | `/deployments/{id}/batch-predictions/{batch_id}/download` | Download prediction CSV |
+| POST | `/deployments/{id}/explain` | Explain one record with permutation Shapley contributions |
 | GET | `/deployments/{id}/health` | Live artifact/cache health |
 | GET | `/deployments/{id}/events` | Lifecycle log |
 | GET | `/deployments/{id}/predictions` | Paginated prediction logs |
@@ -207,6 +241,34 @@ Monitoring config (defaults):
  "window_hours": 24, "auto_retrain_on_drift": false,
  "auto_retrain_cooldown_hours": 12}
 ```
+
+### Progressive release gates
+
+`POST /deployments/{id}/rollout` accepts an optional `model_version_id`, increasing
+`traffic_steps` ending at 100, and gate thresholds. Defaults are 5/20/50/100% traffic,
+100 candidate requests per stage, at most 2% candidate errors, 1000 ms maximum
+candidate p95 latency, 20 labeled examples per variant, and at most 3% quality
+regression. Example:
+
+```json
+{
+  "model_version_id": "optional-version-id",
+  "traffic_steps": [5, 20, 50, 100],
+  "gates": {
+    "min_samples": 100,
+    "max_error_rate": 0.02,
+    "max_p95_latency_ms": 1000,
+    "min_labeled_samples": 20,
+    "max_metric_regression": 0.03
+  }
+}
+```
+
+If the version is omitted, the configured challenger is used. Monitoring scans evaluate
+the active stage. Classification uses labeled accuracy and regression uses relative
+MAE change; a failed gate returns traffic to the champion. Passing the 100% stage
+promotes the candidate and records a deployment revision. Feedback labels are required
+to evaluate the quality gate; until then the rollout waits for enough labeled rows.
 
 ## Predictions
 
@@ -255,6 +317,19 @@ Filters: `status`, `from`, `to`, pagination. Returns features (masked on request
 | GET | `/deployments/{id}/monitoring/latest` | Latest result |
 | GET | `/deployments/{id}/monitoring/timeseries` | Volume/latency/error buckets (`hours`) |
 
+## Alert Channels
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/projects/{id}/alert-channels` | List project alert destinations |
+| POST | `/projects/{id}/alert-channels` | Create a Slack-compatible or generic webhook destination |
+| PATCH | `/projects/{id}/alert-channels/{channel_id}` | Update destination, threshold, secret, or enabled state |
+| DELETE | `/projects/{id}/alert-channels/{channel_id}` | Delete destination |
+| POST | `/projects/{id}/alert-channels/{channel_id}/test` | Send a test notification |
+
+Only `http://` and `https://` target URLs are accepted. The channel secret is never
+returned; webhook requests include an `X-Atlas-Signature` HMAC when a secret is set.
+
 Result shape:
 
 ```json
@@ -287,6 +362,39 @@ approach. The new job stores `retrain_source_deployment_id`. Compare the resulti
 experiment against the deployed version metrics in the console. Promotion remains
 explicit via `/model-versions/{id}/promote` followed by deployment update/rollback
 policy documented in the UI. The API never auto-promotes.
+
+## Reusable workflows and benchmark recipes
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/workflows/templates` | List reusable recipes; optional `problem_type` filter |
+| POST | `/workflows/runs` | Create a persisted pipeline run |
+| GET | `/workflows/runs?project_id=...` | List recent project runs |
+| GET | `/workflows/runs/{id}` | Inspect stages, linked job, experiments, cache state |
+| POST | `/workflows/runs/{id}/retry` | Create a linked retry attempt |
+| GET | `/benchmarks/catalog` | List popular model and pipeline recipes |
+| POST | `/benchmarks/run` | Queue or schedule a benchmark recipe |
+| GET | `/benchmarks/runs?project_id=...` | List benchmark workflow runs |
+| GET | `/benchmarks/results?project_id=...` | Completed multi-model comparisons with protocol and metrics |
+
+Recipes cover classification baselines, imbalanced classification, regression
+baselines, small-data regression, and K-Means clustering. Supervised comparisons share
+one dataset version, a seeded holdout, and cross-validation on training rows; reports
+include held-out metrics, CV mean/spread, training duration, and optional fairness
+summaries. Runs persist their step state and retry lineage. Exact successful matches
+can be reused from a checksum/configuration cache. `scheduled_at` supports a single
+future execution when the monitoring scheduler or Celery Beat is enabled; it is not a
+recurring cron schedule.
+
+## Tracing and SLO snapshot
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable OTLP/HTTP trace export and W3C
+`traceparent` extraction; `OTEL_SERVICE_NAME` controls the reported service name.
+Each response includes `X-Trace-ID` when tracing is enabled. `GET /system/slo` reports
+availability and latency against 99.5% and 95%-under-500-ms objectives from the local
+Prometheus registry. The reported window is process lifetime and resets when the API
+restarts; use a Prometheus server or remote metrics backend for durable, aggregated
+SLO history.
 
 ## Status Codes Summary
 

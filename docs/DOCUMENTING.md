@@ -95,32 +95,38 @@ Detailed design: [ARCHITECTURE.md](ARCHITECTURE.md).
 .
 ├── backend/
 │   ├── app/
-│   │   ├── api/v1/            # HTTP routes (auth, workspaces, datasets, training, experiments, registry, deployments, predictions, overview)
+│   │   ├── api/v1/            # HTTP routes (auth, workspaces, datasets, training, experiments, registry, deployments, predictions, alerts)
 │   │   ├── core/              # config, logging, security, rate limiting, metrics
 │   │   ├── db/                # engine/session, base, init_db
 │   │   ├── ml/                # validation, profiling, preprocessing, algorithms,
-│   │   │                      # training, evaluation, tracking, registry, inference, drift
-│   │   ├── models/            # SQLAlchemy entities (User, Workspace, Dataset, TrainingJob, Experiment, ModelVersion, Deployment, PredictionLog, etc.)
+│   │   │                      # training, evaluation, tracking, registry, inference, drift, explanations
+│   │   ├── models/            # SQLAlchemy entities, including alerting, batch, and collaboration records
 │   │   ├── repositories/      # query layer
 │   │   ├── schemas/           # Pydantic DTOs
 │   │   ├── services/          # use-case orchestration
 │   │   ├── workers/           # Celery app, tasks, thread executor fallback
 │   │   └── main.py
-│   ├── alembic/
+│   ├── alembic/               # versioned schema migrations
+│   │   └── versions/0002_platform_features.py
 │   ├── tests/
 │   │   ├── conftest.py
 │   │   ├── test_api_endpoints.py
 │   │   ├── test_e2e_workflow.py
 │   │   ├── test_ml_pipeline.py
-│   │   └── test_security_and_storage.py
-│   └── Dockerfile
+│   │   ├── test_security_and_storage.py
+│   │   └── test_platform_features.py
+│   ├── Dockerfile
+│   └── e2e_server.py          # isolated migrated and seeded browser-test API
 ├── frontend/
 │   ├── src/
-│   │   ├── components/        # design system, AppShell, PredictionPlayground, RetrainDialog, ToastProvider, SVG charts
-│   │   ├── pages/             # Overview, Datasets, DatasetDetail, Training, NewTraining, Experiments, ExperimentDetail, Models, ModelDetail, Deployments, DeploymentDetail, Monitoring, Settings
+│   │   ├── components/        # design system, prediction playground, team, audit, alerts, batch, challenger, charts
+│   │   ├── pages/             # Overview, Datasets, Training, Experiments, Models, Deployments, Monitoring, Settings, Lineage, Invite
 │   │   ├── lib/               # api client, auth, formatters
 │   │   ├── hooks/             # useApi hook with automatic polling
 │   │   └── styles.css         # token system & layout styles
+│   ├── e2e/                   # Playwright browser workflows and teardown
+│   ├── playwright.config.ts
+│   ├── package.json
 │   ├── Dockerfile
 │   └── nginx.conf
 ├── docs/
@@ -135,7 +141,11 @@ Detailed design: [ARCHITECTURE.md](ARCHITECTURE.md).
 │   ├── SECURITY.md
 │   ├── CHANGELOG.md
 │   └── DOCUMENTING.md
-├── demo-data/                 # customer churn reference dataset
+├── demo-data/
+│   ├── customer_churn.csv
+│   ├── generate_mock_datasets.py
+│   ├── run_mock_benchmarks.py
+│   └── mock-benchmarks/        # six benchmark CSVs, manifest, and results
 ├── docker-compose.yml
 └── README.md
 ```
@@ -154,9 +164,11 @@ Detailed design: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 7 | Prediction serving, API key auth, model cache & logging | Complete |
 | 8 | Drift detection (PSI & KS), feedback & health monitoring | Complete |
 | 9 | Model retraining, candidate comparison & rollback | Complete |
-| 10 | Frontend application shell, 8 primary views & playground | Complete |
-| 11 | Testing and hardening (18/18 pytest, ruff, oxlint, tsc) | Complete |
+| 10 | Frontend application shell, 9 primary views & playground | Complete |
+| 11 | Testing and hardening (21/21 pytest, ruff, oxlint, tsc) | Complete |
 | 12 | Documentation, verified commands & delivery | Complete |
+| 13 | Collaboration, batch scoring, explanations, lineage, alerts, and controlled challengers | Complete |
+| 14 | Release automation, fairness/model cards, traces/SLOs, reusable workflows, benchmark lab | Implemented; integration checks pending |
 
 ## 7. Feature Checklist (actual, verified state)
 
@@ -172,6 +184,8 @@ Detailed design: [ARCHITECTURE.md](ARCHITECTURE.md).
 - [x] Prometheus metrics endpoint (`/metrics`)
 - [x] Rate limiting
 - [x] Audit events
+- [x] Workspace invitations, membership role changes, and paginated workspace audit events
+- [x] Project model lineage from dataset versions through deployments
 
 ### Datasets
 
@@ -216,13 +230,28 @@ Detailed design: [ARCHITECTURE.md](ARCHITECTURE.md).
 - [x] Monitoring results and threshold alerting
 - [x] Manual retraining and drift-triggered retraining
 - [x] Challenger/champion comparison; explicit non-auto-promotion
+- [x] Per-deployment challenger traffic assignment, variant logging, promotion, and rejection
+- [x] CSV batch prediction jobs with result artifact downloads
+- [x] Per-record Monte Carlo permutation Shapley explanations
+- [x] Slack-compatible/webhook alert channels with optional HMAC signing and test delivery
+- [x] Progressive release gates using candidate sample count, failure rate, p95 latency, and labeled quality
+- [x] Held-out group fairness summaries; selected audit columns are excluded from model features
+- [x] Generated model cards with provenance, metrics, fairness results, limitations, and monitoring guidance
+- [x] Reusable workflow templates with persisted DAG state, retries, exact-result cache reuse, and one-time scheduling
+- [x] Popular benchmark recipes and a measured comparison view with split/CV/runtime context
+- [x] Optional OpenTelemetry OTLP request traces and an SLO dashboard backed by Prometheus process metrics
 
 ### Delivery
 
-- [x] Frontend shell and all eight views (Overview, Datasets, Training, Experiments, Models, Deployments, Monitoring, Settings)
+- [x] Frontend shell and ten views (Overview, Datasets, Training, Experiments, Models, Deployments, Monitoring, Benchmarks, Lineage, Settings)
+- [x] Workspace invite and role management, audit filtering, and alert channel settings UI
+- [x] Deployment batch scoring, challenger routing, and prediction explanation UI
+- [x] Benchmark Lab with recipe catalog, workflow progress, CV comparisons, and prior training-job result comparisons
+- [x] Progressive rollout controls, fairness panel, model-card downloads, and monitoring SLO panel
+- [x] Playwright browser workflows for invitations, prediction and batch scoring, challenger setup, alerts, and lineage
 - [x] Real data only; loading/error/empty states
 - [x] Docker Compose for the full stack (Postgres, Redis, MLflow, Backend, Celery Worker, Frontend/Nginx)
-- [x] Backend unit/integration/e2e tests (18 tests passing)
+- [x] Backend unit/integration/e2e tests (21 tests passing)
 - [x] Frontend typecheck and production build (`tsc -b && vite build`)
 - [x] Demo dataset and reproducible workflow
 - [x] README and docs verified against code
@@ -246,17 +275,21 @@ See `docs/decisions/` for ADRs. Key decisions:
 | 2026-11-01 | `sqlite3.OperationalError: no such table: training_jobs` during sync job worker execution in tests | In-memory SQLite connections (`sqlite:///:memory:`) create separate isolated databases per connection. Fixed by binding test environment to a temporary file-based SQLite DB in `conftest.py`. |
 | 2026-11-01 | Minimum rows requirement for training estimators | Test dataset needed at least 20 rows to train algorithms; created `training_csv` fixture with 30 realistic churn records. |
 | 2026-11-01 | `ValueError: PSI inputs must have the same number of buckets` | `float_or_none` converted `-np.inf` and `np.inf` to `None` for JSON serialization, and `_numeric_edge_buckets` filtered out `None` edges, losing 2 buckets. Fixed `_numeric_edge_buckets` to preserve first and last edges as `-np.inf` and `np.inf`. |
+| 2026-11-01 | Existing development SQLite had tables from `Base.metadata.create_all` but no Alembic history, so `upgrade head` collided with existing tables. | Preserved the database, applied the additive 0002 columns/index locally, and stamped the database at `0002_platform`. Fresh installs should run `alembic upgrade head` before starting the API or running `seed-demo`. |
 
 ## 10. Testing Performed
 
 | Component | Command | Result |
 |---|---|---|
 | Reconnaissance | `python --version`, `node --version`, `docker info` | Python 3.13.15, Node 24.19.0, Docker 29.9.1 |
-| Backend Tests | `python -m pytest -v` | **18/18 passed** in 3.81s (`test_api_endpoints.py`, `test_e2e_workflow.py`, `test_ml_pipeline.py`, `test_security_and_storage.py`) |
-| Backend Lint | `ruff check app tests` | **All checks passed!** (0 errors) |
-| Backend Format | `ruff format --check app tests` | **90 files checked, 90 files properly formatted** |
-| Frontend Lint | `npm run lint` (`oxlint`) | **0 errors** (32 warnings, fast linter pass) |
-| Frontend Build | `npm run build` (`tsc -b && vite build`) | **Zero TypeScript errors**, bundle built cleanly |
+| Backend Tests | `..\.venv\Scripts\python.exe -m pytest -q` | **21/21 passed** in 12.12s, including categorical missing-value training and prediction |
+| Backend Lint | `ruff check app tests e2e_server.py ..\demo-data\generate_mock_datasets.py ..\demo-data\run_mock_benchmarks.py` | **All checks passed!** (0 errors) |
+| Backend Format | `ruff format --check app tests e2e_server.py ..\demo-data\generate_mock_datasets.py ..\demo-data\run_mock_benchmarks.py` | **111 files already formatted** |
+| Frontend Lint | `npm run lint` (`oxlint`) | **0 errors** (non-blocking React hook/fast-refresh warnings remain) |
+| Frontend Build | `npm run build` (`tsc -b && vite build`) | **Zero TypeScript errors**; Vite reports a non-blocking chunk-size advisory above 500 kB |
+| Browser E2E | `npm run e2e` | **3/3 passed** on Chromium; clean SQLite Alembic migrations, invitation acceptance, batch/explanation/challenger, webhook, and lineage flows |
+| Demo screenshots | `npm run screenshots` | Five 3x screenshots regenerated from the seeded Customer Churn project, including a live playground prediction |
+| Synthetic Benchmarks | `python demo-data/run_mock_benchmarks.py` | **6 datasets / 18,000 rows / 12 completed experiments / 6 pairwise comparisons**, with 80/20 holdout and 3-fold CV |
 
 ## 11. Verified Verification Commands
 
@@ -280,3 +313,116 @@ npm run build
 - Single-node deployment in default Docker Compose; Celery worker concurrency defaults to available host cores.
 - Model cache is bounded per API process; eviction uses LRU policy when `MODEL_CACHE_SIZE` is reached.
 - Concept drift is calculated upon arrival of ground-truth feedback via `/api/v1/predictions/feedback`.
+
+## 13. Reconciled Progress from the Previous Development Run
+
+This journal now records work completed before the current feature phase as well as
+the new code below. The earlier run delivered the following:
+
+- Added six deterministic, 3,000-row synthetic tabular datasets: SaaS churn, loan
+  repayment/default, e-commerce conversion, retail demand, delivery ETA, and used
+  vehicle prices. Generator, manifest, upload notes, results JSON/CSV, and a Markdown
+  summary live under `demo-data/`.
+- Ran the six datasets through paired baseline experiments with a shared 80/20 holdout,
+  seed 42, and three-fold cross-validation. The successful report has 18,000 rows,
+  12 completed experiments, and six pairwise comparisons. The report files are
+  `demo-data/mock-benchmarks/benchmark_results.json`, `.csv`, and
+  `benchmark_summary.md`.
+- The first app training attempt exposed categorical `pd.NA` incompatibility in the
+  scikit-learn preprocessing path. The preprocessing conversion and regression
+  coverage were added, then all six datasets were uploaded and re-run successfully.
+  Earlier failed job/experiment rows remain in project history; they were not removed
+  from the audit trail. The benchmark report counts only the completed rerun.
+- Replaced the Vite template favicon with the Atlas four-tile favicon in
+  `frontend/public/favicon.svg` and pointed `frontend/index.html` at it. The prior
+  browser capture pass also refreshed the five project screenshots at 3x resolution.
+- Completed and documented workspace invites/roles, audit history, dataset-to-model
+  lineage, batch prediction exports, local Shapley explanations, signed webhook
+  alerts, and challenger traffic assignment. The previous reported browser run covered
+  those flows, and the previous backend run reported 21 passing tests.
+
+## 14. Advanced Model Operations and Benchmark Lab
+
+### Release gates and progressive rollout
+
+- Migration `0003_modelops_workflows.py` adds the `deployment_rollouts` table and a
+  partial unique index that permits one running rollout per deployment.
+- A rollout can use a configured challenger or a candidate version directly. It starts
+  at 5% by default, then steps through 20%, 50%, and 100% (custom increasing steps are
+  accepted, ending at 100%). The monitoring scan evaluates each step.
+- Gates cover minimum candidate requests, maximum candidate error rate, candidate p95
+  latency, minimum labeled examples for both variants, and maximum metric regression.
+  Classification compares labeled accuracy; regression compares relative MAE change.
+  A failed gate sets challenger traffic to zero and records an event. A final passed
+  stage promotes the candidate, writes a revision, and audits the promotion.
+- Manual challenger edits are rejected while an automated rollout is running. The
+  rollout UI exposes gate thresholds, step state, sample evidence, and cancellation.
+
+### Fairness evaluation and model cards
+
+- Training requests can specify sensitive audit columns. The backend checks that the
+  columns exist, rejects overlap with explicit model features, and omits them from the
+  default feature set. Fairness is computed on the held-out split, not the training
+  rows.
+- Classification reports subgroup sample count and accuracy; for binary targets it
+  also reports selection rate, TPR, FPR, and selection/accuracy gaps for the final
+  estimator class. Regression reports subgroup MAE/RMSE and MAE gap. Small-group
+  counts and interpretation notes accompany the result.
+- Registered model versions expose JSON at
+  `/api/v1/model-versions/{version_id}/card` and downloadable Markdown at
+  `/api/v1/model-versions/{version_id}/card.md`. Cards are generated from immutable
+  model-version, experiment, dataset-version, and artifact provenance; there is no
+  separate mutable card table.
+
+### OpenTelemetry and SLO dashboard
+
+- When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the API creates HTTP request spans,
+  accepts W3C `traceparent`, exports spans using OTLP/HTTP, and returns `X-Trace-ID`.
+  Tracing stays disabled when the endpoint is unset. The Python OTLP exporter setup
+  follows the [official OpenTelemetry exporter documentation](https://opentelemetry.io/docs/languages/python/exporters/).
+- Authenticated `GET /api/v1/system/slo` backs the Monitoring page with a 99.5%
+  availability objective and a 95% latency objective at 500 ms, plus p95 and error
+  budget use. These values come from the in-process Prometheus registry and reset when
+  the API process restarts; a Prometheus server or remote metrics store is needed for
+  durable, multi-process, time-windowed SLO history.
+
+### Reusable workflows and benchmarks
+
+- `/api/v1/workflows/templates` lists the reusable graph recipes and
+  `/api/v1/workflows/runs` creates, lists, inspects, or retries run records. Workflow
+  state is persisted in `workflow_runs`, linked to the training job, and reports the
+  validate → prepare → train → evaluate → fairness → register stages.
+- Retries create a new attempt linked to the prior run (up to the configured limit).
+  A SHA-256 cache key includes the dataset checksum and effective recipe/training
+  configuration; an identical completed run can be reused. `scheduled_at` supports a
+  one-time future run; scheduled runs need `ENABLE_MONITORING_SCHEDULER=true` in local
+  thread mode or the existing Celery Beat service in Compose.
+- The Benchmark Lab catalog includes classification baselines, imbalanced
+  classification, regression baselines, small-data regression, and a clustering
+  baseline. Supervised recipes use the same selected dataset version, seeded 80/20
+  split, and three-fold CV by default. Training jobs record held-out metrics, CV mean
+  and spread, training duration, and optional fairness summaries. The page also
+  surfaces completed multi-model jobs already in project history, including the six
+  synthetic dataset comparisons from the previous run.
+- Templates are predefined and versioned in code rather than user-authored DAGs. Cache
+  reuse operates at the completed-run level (not individual intermediate steps), and
+  scheduling is one-time rather than cron recurrence.
+
+## 15. Current Phase Verification
+
+Completed on 2026-11-01 after this phase's edits:
+
+| Check | Result |
+|---|---|
+| Python compile (`python -m compileall -q app alembic/versions/0003_modelops_workflows.py`) | Passed |
+| Backend lint (`ruff check app alembic/versions/0003_modelops_workflows.py`) | Passed |
+| Backend format (`ruff format --check app alembic/versions/0003_modelops_workflows.py`) | 112 files already formatted |
+| Frontend lint (`npm run lint`) | Passed with non-blocking Oxlint warnings; no errors |
+| Frontend production build (`npm run build`) | Passed with zero TypeScript errors; Vite emitted the >500 kB bundle advisory |
+| Documentation/patch whitespace (`git diff --check`) | Passed |
+| Backend pytest / browser E2E | Not rerun during this phase; earlier results are recorded in Section 10 |
+
+The API specification, database schema, deployment configuration guide, README,
+changelog, implementation plan, and this journal now describe the rollout, fairness,
+model-card, benchmark workflow, and tracing/SLO contracts. No fresh unit, integration,
+or browser test result is claimed for this phase.

@@ -75,6 +75,8 @@ services:
       CORS_ORIGINS: http://localhost:3000,http://localhost:5173
       LOG_LEVEL: INFO
       LOG_JSON: "true"
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-atlas-api}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     volumes:
       - artifacts_data:/data/artifacts
     depends_on:

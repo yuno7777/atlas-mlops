@@ -1,0 +1,95 @@
+[
+  {
+    "name": "SaaS Customer Churn",
+    "filename": "saas_churn.csv",
+    "seed": 11101,
+    "rows": 3000,
+    "columns": 10,
+    "problem_type": "classification",
+    "target": "churned",
+    "missing_feature_cells": 464,
+    "target_summary": {
+      "no": 0.7657,
+      "yes": 0.2343
+    },
+    "size_bytes": 167055
+  },
+  {
+    "name": "Loan Repayment Risk",
+    "filename": "loan_repayment.csv",
+    "seed": 22202,
+    "rows": 3000,
+    "columns": 10,
+    "problem_type": "classification",
+    "target": "defaulted",
+    "missing_feature_cells": 486,
+    "target_summary": {
+      "no": 0.6607,
+      "yes": 0.3393
+    },
+    "size_bytes": 194563
+  },
+  {
+    "name": "E-commerce Conversion",
+    "filename": "ecommerce_conversion.csv",
+    "seed": 33303,
+    "rows": 3000,
+    "columns": 11,
+    "problem_type": "classification",
+    "target": "converted",
+    "missing_feature_cells": 574,
+    "target_summary": {
+      "no": 0.4847,
+      "yes": 0.5153
+    },
+    "size_bytes": 176826
+  },
+  {
+    "name": "Retail Demand Forecast",
+    "filename": "retail_demand.csv",
+    "seed": 44404,
+    "rows": 3000,
+    "columns": 9,
+    "problem_type": "regression",
+    "target": "units_sold",
+    "missing_feature_cells": 416,
+    "target_summary": {
+      "min": 0.0,
+      "median": 61.0,
+      "max": 142.0
+    },
+    "size_bytes": 154726
+  },
+  {
+    "name": "Delivery ETA Forecast",
+    "filename": "delivery_eta.csv",
+    "seed": 55505,
+    "rows": 3000,
+    "columns": 10,
+    "problem_type": "regression",
+    "target": "eta_minutes",
+    "missing_feature_cells": 503,
+    "target_summary": {
+      "min": 5.0,
+      "median": 44.3,
+      "max": 143.0
+    },
+    "size_bytes": 154156
+  },
+  {
+    "name": "Used Vehicle Prices",
+    "filename": "used_vehicle_prices.csv",
+    "seed": 66606,
+    "rows": 3000,
+    "columns": 10,
+    "problem_type": "regression",
+    "target": "sale_price",
+    "missing_feature_cells": 476,
+    "target_summary": {
+      "min": 1200.0,
+      "median": 10788.83,
+      "max": 50058.37
+    },
+    "size_bytes": 198986
+  }
+]
