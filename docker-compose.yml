@@ -1,0 +1,152 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: atlas-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-atlas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-atlas_secret_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-atlas}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: atlas-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mlflow:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: atlas-mlflow
+    restart: unless-stopped
+    command: >
+      mlflow server
+      --backend-store-uri postgresql+psycopg://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas_secret_pass}@postgres:5432/${POSTGRES_DB:-atlas}
+      --default-artifact-root /data/artifacts/mlflow
+      --host 0.0.0.0
+      --port 5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - artifacts_data:/data/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: atlas-backend
+    restart: unless-stopped
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    environment:
+      ENVIRONMENT: production
+      SECRET_KEY: ${SECRET_KEY:-dev-only-insecure-secret-change-me-at-least-32-chars}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas_secret_pass}@postgres:5432/${POSTGRES_DB:-atlas}
+      REDIS_URL: redis://redis:6379/0
+      JOB_EXECUTION_MODE: celery
+      MLFLOW_ENABLED: "true"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_ARTIFACT_ROOT: /data/artifacts/mlflow
+      ARTIFACT_ROOT: /data/artifacts
+      STORAGE_BACKEND: local
+      CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+      LOG_LEVEL: INFO
+      LOG_JSON: "true"
+    volumes:
+      - artifacts_data:/data/artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: atlas-worker
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app worker --loglevel=info -c 2
+    environment:
+      ENVIRONMENT: production
+      SECRET_KEY: ${SECRET_KEY:-dev-only-insecure-secret-change-me-at-least-32-chars}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas_secret_pass}@postgres:5432/${POSTGRES_DB:-atlas}
+      REDIS_URL: redis://redis:6379/0
+      JOB_EXECUTION_MODE: celery
+      MLFLOW_ENABLED: "true"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_ARTIFACT_ROOT: /data/artifacts/mlflow
+      ARTIFACT_ROOT: /data/artifacts
+      STORAGE_BACKEND: local
+      LOG_LEVEL: INFO
+    volumes:
+      - artifacts_data:/data/artifacts
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: atlas-beat
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    environment:
+      ENVIRONMENT: production
+      SECRET_KEY: ${SECRET_KEY:-dev-only-insecure-secret-change-me-at-least-32-chars}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas_secret_pass}@postgres:5432/${POSTGRES_DB:-atlas}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: atlas-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  artifacts_data:
