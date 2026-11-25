@@ -11,7 +11,7 @@ x-atlas-environment: &atlas-environment
   JOB_EXECUTION_MODE: celery
   MLFLOW_ENABLED: "true"
   MLFLOW_TRACKING_URI: http://mlflow:5000
-  MLFLOW_HTTP_REQUEST_TIMEOUT: "5"
+  MLFLOW_HTTP_REQUEST_TIMEOUT: "15"
   MLFLOW_HTTP_REQUEST_MAX_RETRIES: "1"
   MLFLOW_ARTIFACT_ROOT: /data/artifacts/mlflow
   ARTIFACT_ROOT: /data/artifacts
@@ -19,6 +19,7 @@ x-atlas-environment: &atlas-environment
   CORS_ORIGINS: http://localhost:3000,http://localhost:5173
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_JSON: "true"
+  ALERT_WEBHOOK_ALLOWED_HOSTS: ${ALERT_WEBHOOK_ALLOWED_HOSTS:-}
   ENABLE_MONITORING_SCHEDULER: ${ENABLE_MONITORING_SCHEDULER:-true}
   INFERENCE_THREADS: ${INFERENCE_THREADS:-4}
   INFERENCE_TIMEOUT_SECONDS: ${INFERENCE_TIMEOUT_SECONDS:-10}
@@ -48,7 +49,7 @@ services:
     cpus: 1.0
     mem_limit: 512m
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 4s
       retries: 12
@@ -112,7 +113,7 @@ services:
       mlflow-db-init:
         condition: service_completed_successfully
     cpus: 1.0
-    mem_limit: 768m
+    mem_limit: 1536m
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).close()"]
       interval: 10s

@@ -42,6 +42,13 @@ docker run --rm --user 0:0 --entrypoint chown \
 
 The API container runs `alembic upgrade head` before starting Uvicorn. Confirm the applied revision with `docker compose exec backend alembic current`. Back up before downgrading. Plain `docker compose down` preserves volumes. The `--volumes` option deletes them.
 
+## Alert destinations
+
+In production, set `ALERT_WEBHOOK_ALLOWED_HOSTS` to the exact hostnames approved by the
+operator, for example `hooks.slack.com`. The API and worker deliver to HTTPS on port
+443 and reject redirects. Existing channels remain visible and delivery reports a
+configuration error if their host is missing from the allowlist.
+
 ## Storage and model trust
 
 For S3, pass `STORAGE_BACKEND=s3`, `S3_BUCKET`, optional `S3_REGION` and `S3_ENDPOINT_URL`, and credentials or workload identity to both the API and worker through a deployment override. Use a private bucket with workload-scoped access and object versioning. To move MLflow artifacts separately, set its `--artifacts-destination` and grant the tracking process access.

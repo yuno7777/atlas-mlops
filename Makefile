@@ -1,7 +1,6 @@
 PYTHON_VERSION ?= 3.12
 UV ?= uv
 DOCKER ?= docker
-COMPOSE ?= $(DOCKER) compose
 REVISION := $(shell git rev-parse HEAD 2>/dev/null || printf unknown)
 VENV := .venv
 PYTHON := $(VENV)/bin/python

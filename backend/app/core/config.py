@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     drift_share_threshold: float = 0.3
     performance_degradation_threshold: float = 0.15
     retrain_cooldown_hours: int = 12
+    alert_webhook_allowed_hosts: str = ""
 
     worker_metrics_port: int | None = Field(default=None, ge=1024, le=65535)
     log_level: str = "INFO"

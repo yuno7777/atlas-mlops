@@ -8,10 +8,12 @@ import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import NotFoundError
+from app.core.config import get_settings
+from app.core.exceptions import NotFoundError, ValidationError
 from app.models.alerting import AlertChannel, AlertDelivery
 from app.models.deployment import Deployment
 from app.models.monitoring import MonitoringResult
@@ -33,25 +35,51 @@ logger = logging.getLogger(__name__)
 STATUS_RANK = {"insufficient_data": 0, "healthy": 1, "warning": 2, "critical": 3}
 
 
+class RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _check_target(url: str) -> None:
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValidationError("Invalid alert target URL.") from exc
+    if parsed.scheme not in {"https", "http"} or not host or parsed.username is not None:
+        raise ValidationError("Alert target must be an HTTP(S) URL without user credentials.")
+    settings = get_settings()
+    if settings.environment == "production":
+        allowlist = {
+            host.strip().lower() for host in settings.alert_webhook_allowed_hosts.split(",")
+        }
+        if parsed.scheme != "https" or port not in {None, 443} or host not in allowlist:
+            raise ValidationError("Alert target must use HTTPS on an administrator-approved host.")
+
+
 def _post_json(
     url: str, payload: dict[str, Any], headers: dict[str, str]
 ) -> tuple[int | None, str | None]:
-    if not url.startswith(("https://", "http://")):
-        return None, "Alert target must use http or https."
+    try:
+        _check_target(url)
+    except ValidationError as exc:
+        return None, exc.message
     body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(  # noqa: S310
+    request = urllib.request.Request(  # noqa: S310 - target validated above
         url,
         data=body,
         headers={"Content-Type": "application/json", **headers},
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310
+        opener = urllib.request.build_opener(RejectRedirects())
+        with opener.open(request, timeout=5) as response:
             return int(response.status), None
     except urllib.error.HTTPError as exc:
         return int(exc.code), f"HTTP {exc.code}"
-    except Exception as exc:
-        return None, str(exc)[:500]
+    except (OSError, ValueError):
+        return None, "Could not reach the alert target."
 
 
 def _delivery_payload(
@@ -209,6 +237,7 @@ def create_channel(
     ip_address: str | None = None,
 ) -> AlertChannelOut:
     project, _role = require_project(db, user, project_id, write=True)
+    _check_target(payload.target_url)
     channel = AlertChannel(
         project_id=project.id,
         name=payload.name,
@@ -250,6 +279,8 @@ def update_channel(
     if channel is None or channel.project_id != project.id:
         raise NotFoundError("Alert channel not found.")
     updates = payload.model_dump(exclude_unset=True)
+    if payload.target_url is not None:
+        _check_target(payload.target_url)
     if "secret" in updates:
         channel.secret = updates.pop("secret") or None
     for key, value in updates.items():

@@ -108,7 +108,12 @@ jobs:
           docker compose exec -T backend python -c "import urllib.request; assert b'atlas_training_jobs_total' in urllib.request.urlopen('http://worker:9101/metrics', timeout=5).read()"
       - name: Container logs
         if: failure()
-        run: docker compose logs --tail 100
+        run: |
+          docker compose ps --all
+          for container in $(docker compose ps --all --quiet); do
+            docker inspect --format '{{.Name}} status={{.State.Status}} oom={{.State.OOMKilled}} restarts={{.RestartCount}}' "$container"
+          done
+          docker compose logs --tail 100
       - name: Clean up test stack
         if: always()
         run: docker compose down --volumes --remove-orphans

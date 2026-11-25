@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -43,7 +44,7 @@ export default defineConfig({
         DATABASE_URL: `sqlite:///${databasePath}`,
         MLFLOW_TRACKING_URI: `sqlite:///${mlflowPath}`,
         ARTIFACT_ROOT: join(stateDir, 'artifacts'),
-        SECRET_KEY: 'atlas-e2e-test-secret-key-with-sufficient-length',
+        SECRET_KEY: randomBytes(32).toString('hex'),
         ENVIRONMENT: 'test',
         JOB_EXECUTION_MODE: 'sync',
         MLFLOW_ENABLED: 'false',

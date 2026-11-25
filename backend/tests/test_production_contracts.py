@@ -13,6 +13,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from app.core.config import Settings, get_settings
 from app.core.exceptions import ServiceUnavailableError
 from app.ml.executor import InferenceExecutor
+from app.services.alerts import RejectRedirects, _post_json
 from app.services.predictions import ModelArtifact, ModelCache
 from app.services.storage import LocalStorage
 
@@ -115,3 +116,23 @@ def test_prediction_body_limit_applies_before_validation(
     )
     assert result.status_code == 413
     assert result.json()["error"]["request_id"] == "oversize"
+
+
+def test_production_webhooks_require_an_approved_https_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "alert_webhook_allowed_hosts", "hooks.example.com")
+    opener = Mock()
+    monkeypatch.setattr("app.services.alerts.urllib.request.build_opener", opener)
+    for url in ("http://hooks.example.com/alert", "https://unapproved.example.com/alert"):
+        status, message = _post_json(url, {}, {})
+        assert status is None and "administrator-approved host" in message
+    opener.assert_not_called()
+    assert (
+        RejectRedirects().redirect_request(
+            None, None, 302, "Found", {}, "https://unapproved.example.com"
+        )
+        is None
+    )
