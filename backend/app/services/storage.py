@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Generator, Iterator
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Protocol
+from typing import IO, BinaryIO, Protocol
 
 from app.core.config import get_settings
 from app.core.exceptions import NotFoundError, ServiceUnavailableError
@@ -74,14 +74,14 @@ class LocalStorage:
         return path
 
     @contextlib.contextmanager
-    def _atomic_writer(self, key: str) -> Iterator[BinaryIO]:
+    def _atomic_writer(self, key: str) -> Iterator[IO[bytes]]:
         destination = self._resolve(key)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temp_path = None
         try:
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
                 temp_path = Path(handle.name)
-                yield handle
+                yield handle.file
             temp_path.replace(destination)
         finally:
             if temp_path is not None:
