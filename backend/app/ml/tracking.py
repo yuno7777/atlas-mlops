@@ -9,6 +9,7 @@ from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
+os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
 
 
 class MLflowTracker:

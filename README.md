@@ -2,8 +2,8 @@
 
 **Self-hosted tabular MLOps platform for training, experiment tracking, versioned registry, real-time inference, and drift monitoring.**
 
-[![Atlas CI](https://github.com/yuno7777/mlops-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/yuno7777/mlops-platform/actions/workflows/ci.yml)
-[![Python 3.13](https://img.shields.io/badge/Python-3.13-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
+[![Atlas CI](https://github.com/yuno7777/atlas-mlops/actions/workflows/ci.yml/badge.svg)](https://github.com/yuno7777/atlas-mlops/actions/workflows/ci.yml)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![React 19](https://img.shields.io/badge/React-19-61DAFB?style=flat&logo=react&logoColor=black)](https://react.dev)
 [![MLflow](https://img.shields.io/badge/MLflow-3.17-0194E2?style=flat&logo=mlflow&logoColor=white)](https://mlflow.org)
@@ -15,7 +15,7 @@
 
 ![Atlas Overview Dashboard](docs/assets/screenshots/overview.png)
 
-Atlas provides a complete machine learning lifecycle stack in a single deployable repository. It handles tabular dataset validation, multi-algorithm model training, MLflow tracking, stage-based registration, sub-50ms authenticated inference, and automated statistical drift detection.
+Atlas provides a complete machine learning lifecycle stack in a single deployable repository. It handles tabular dataset validation, multi-algorithm model training, MLflow tracking, stage-based registration, authenticated inference, and automated statistical drift detection.
 
 ---
 
@@ -38,36 +38,28 @@ Atlas provides a complete machine learning lifecycle stack in a single deployabl
 
 ## System Architecture
 
-```text
-               +---------------------------------------+
-               |        Atlas UI (React 19 + Vite)     |
-               |     Custom Dark-Mode Token System     |
-               +-------------------+-------------------+
-                                   | HTTP / REST
-                                   v
-               +---------------------------------------+
-               |        Atlas API (FastAPI / ASGI)     |
-               |     JWT Auth | RBAC | API Key Guard   |
-               +---------+-------------------+---------+
-                         |                   |
-            +------------+-------+   +-------+---------------+
-            |  PostgreSQL / DB   |   |   Redis (Task Queue)  |
-            | SQLAlchemy + Alembic|   +-------+---------------+
-            +--------------------+           |
-                                             v
-            +--------------------+   +-----------------------+
-            |  MLflow Tracking   |<--|     Celery Worker     |
-            | Parameters & Runs  |   | Training & Drift Math |
-            +--------------------+   +-------+---------------+
-                                             |
-                                             v
-                                     +-----------------------+
-                                     |    Artifact Store     |
-                                     | Local Volume or S3    |
-                                     +-----------------------+
+```mermaid
+flowchart TD
+    UI["React UI and API clients"] --> API["FastAPI"]
+    API --> Ingest["Validate and version datasets"]
+    Ingest --> Store["Artifact volume or S3"]
+    API --> Catalog["PostgreSQL or local SQLite"]
+    API --> Queue["Redis training queue"]
+    Queue --> Worker["Celery training worker"]
+    Store --> Worker
+    Worker --> Runs["MLflow and experiment records"]
+    Worker --> Store
+    Runs --> Registry["Model registry and deployment"]
+    Registry --> Serve["Verified inference and feedback"]
+    Store --> Serve
+    Serve --> Drift["Scheduled drift monitoring"]
+    Drift --> Queue
 ```
 
----
+- **API and UI** handle uploads, workspace access, training submissions, registry operations, and predictions.
+- **Training** verifies the dataset checksum, fits a seeded pipeline, and records evaluation metrics, model digests, and library versions. MLflow tracks runs and artifacts.
+- **Registry and inference** connect experiments to deployed model versions. Serving verifies registered artifacts and validates prediction records against the trained feature schema.
+- **Monitoring** compares observed inputs, predictions, and labeled feedback to reference data. Prometheus can scrape the API and Celery worker separately.
 
 ## Interface & Workflows
 
@@ -97,7 +89,7 @@ Monitor live feature distributions, output score shift, and statistical drift al
 
 | Layer | Technologies |
 |---|---|
-| **Backend API** | Python 3.13, FastAPI, Pydantic v2, SQLAlchemy 2, Alembic, Uvicorn |
+| **Backend API** | Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2, Alembic, Uvicorn |
 | **Distributed Tasks** | Celery, Redis |
 | **ML Engine** | scikit-learn, joblib, NumPy, pandas, SciPy, PyTorch (optional MLP) |
 | **Experiment Tracking** | MLflow |
@@ -107,82 +99,67 @@ Monitor live feature distributions, output score shift, and statistical drift al
 
 ---
 
-## Quickstart with Docker Compose
+## Local quickstart
 
-Spin up the entire stack (PostgreSQL, Redis, MLflow, Backend API, Celery Worker, and Frontend UI) with one command:
-
-```bash
-docker compose up -d --build
-```
-
-### Service Endpoints
-
-| Service | URL | Default Credentials |
-|---|---|---|
-| Atlas Web Platform | [http://localhost:3000](http://localhost:3000) | demo@atlasmlops.dev / demo-password-123 |
-| FastAPI Interactive Docs | [http://localhost:8000/docs](http://localhost:8000/docs) | None |
-| MLflow Tracking Dashboard | [http://localhost:5000](http://localhost:5000) | None |
-| Prometheus Metrics | [http://localhost:8000/metrics](http://localhost:8000/metrics) | None |
-
-### Deploy to a VPS
-
-The production override puts the full stack behind Caddy with automatic HTTPS and closes
-every port except 80 and 443:
+For a CPU-only run, use Python 3.12, [uv](https://docs.astral.sh/uv/), Node.js 24, and GNU Make. On Windows, use WSL for the commands below.
 
 ```bash
-# Set DOMAIN, SECRET_KEY, and POSTGRES_PASSWORD in .env first
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+make setup
+make train-smoke
+make serve
 ```
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the single-server checklist.
+The smoke test runs the full lifecycle on 30 synthetic rows with SQLite and an in-process worker. It uploads and validates data, trains two small classifiers, registers and deploys the best run, sends predictions and feedback, and exercises monitoring and retraining. It needs no Docker, Redis, or remote tracking service.
 
----
-
-## Local Development
-
-### Prerequisites
-
-- Python 3.11+ (Python 3.13 recommended)
-- Node.js 20+ and npm
-- Docker (optional, for Redis and PostgreSQL)
-
-### 1. Backend Setup
+The standalone API serves [readiness](http://127.0.0.1:8000/ready) and [OpenAPI docs](http://127.0.0.1:8000/api/v1/docs). Run `npm --prefix frontend run dev` for the UI at [localhost:5173](http://localhost:5173). To populate it with the local demo, run this after the database migration performed by `make serve`.
 
 ```bash
 cd backend
-
-# Create and activate virtual environment
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies
-pip install -e .
-
-# Run database migrations
-alembic upgrade head
-
-# Seed sample project, dataset, trained model, and active deployment
-python -m app.cli seed-demo
-
-# Start the API server
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+MLFLOW_ENABLED=false .venv/bin/python -m app.cli seed-demo
 ```
 
-### 2. Frontend Setup
+The demo account is `demo@atlasmlops.dev` with password `demo-password-123`. Use it only on your development instance.
+
+## Docker Compose
+
+Use Docker Engine with Compose v2.24.4 or later. The Compose stack also runs PostgreSQL, Redis, Celery, and the MLflow HTTP tracking server.
 
 ```bash
-cd frontend
-
-# Install dependencies
-npm install
-
-# Start development server
-npm run dev
+cp .env.example .env
+# Set SECRET_KEY and POSTGRES_PASSWORD in .env to different random values.
+# Generate each with: openssl rand -hex 32
+CODE_REVISION=$(git rev-parse HEAD) docker compose up -d --build --wait
+python3 scripts/compose_smoke.py
 ```
 
-The UI will be accessible at [http://127.0.0.1:5173](http://127.0.0.1:5173). Requests to `/api` proxy automatically to the backend running on port 8000.
+Open [the UI](http://127.0.0.1:3000), [MLflow](http://127.0.0.1:5000), or [the API metrics](http://127.0.0.1:8000/metrics). The Compose smoke check creates its own account and uses 96 rows to verify asynchronous training, MLflow, registry, and inference. Run it on a development stack with registration enabled.
 
----
+For a public VPS, set `DOMAIN` and start Caddy with both Compose files. Local service ports are closed by the production overlay. See the deployment runbook for account bootstrap and upgrade steps. [Deployment runbook](docs/DEPLOYMENT.md)
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --wait
+```
+
+## Configuration and operations
+
+| Setting | Purpose and default |
+| --- | --- |
+| `SECRET_KEY` | Required in Compose. Standalone development has a local-only fallback. Generate at least 32 characters. |
+| `POSTGRES_PASSWORD` | Required in Compose. Use URL-safe characters. Atlas and MLflow use `POSTGRES_DB` and `MLFLOW_POSTGRES_DB` respectively. |
+| `DATABASE_URL`, `ARTIFACT_ROOT` | Standalone defaults to SQLite and a local artifact directory. Back up metadata and artifacts together. |
+| `JOB_EXECUTION_MODE`, `REDIS_URL` | Standalone defaults to threads. Compose uses Celery with Redis and a periodic reconciliation task. |
+| `MLFLOW_ENABLED`, `MLFLOW_TRACKING_URI` | Standalone tracking uses local SQLite. Compose uses the internal MLflow server. |
+| `INFERENCE_THREADS`, `INFERENCE_TIMEOUT_SECONDS`, `MAX_PREDICTION_BODY_BYTES` | Defaults are 4 workers, a 10-second scoring deadline, and 2 MiB per prediction request. |
+| `LOG_JSON`, `OTEL_EXPORTER_OTLP_ENDPOINT` | Request and training logs are JSON by default. Set an OTLP endpoint to export traces. |
+| `ENABLE_MONITORING_SCHEDULER`, `MONITORING_INTERVAL_SECONDS` | Compose enables periodic monitoring. The default scan interval is 900 seconds. |
+| `STORAGE_BACKEND`, `S3_BUCKET` | Local is the default. Configure S3 storage and bucket permissions together when using object storage. |
+
+Use the same `Idempotency-Key` when retrying a training submission after a transport failure. Each key is scoped to the project and submitting user. A changed request with the same key returns `409`. Keep the recorded dataset and model SHA-256 digests, seed, code revision, and Python package versions with the run.
+
+- **Readiness returns 503.** Check the named dependency in `/ready`. Celery mode checks Redis as well as PostgreSQL and artifact storage.
+- **A training job remains queued.** Check Redis, the worker, and beat. Reconciliation republishes old queued jobs. A stale running job is marked failed and can be resubmitted with a new idempotency key.
+- **A model returns 503.** Check the deployment state and registry artifact digest, restore verified bytes from backup, or register a fresh run. A busy inference pool also returns 503. Scoring deadlines return 504.
+- **Drift is missing from Grafana.** Scrape the API at `backend:8000/metrics` and the Celery worker at `worker:9101/metrics` from the Compose network. Use `atlas_http_requests_total`, `atlas_http_request_duration_seconds`, and `atlas_drift_signals_total` for request and drift panels.
 
 ## Synthetic Model Benchmarks
 
@@ -227,43 +204,16 @@ the full pipeline attempt history. The API contract and generated synthetic resu
 are documented in [docs/API_SPECIFICATION.md](docs/API_SPECIFICATION.md) and
 [demo-data/mock-benchmarks](demo-data/mock-benchmarks/README.md).
 
-## Testing & Code Quality
-
-Automated checks cover dataset validation, training and serving workflows, drift calculations, collaboration, batch scoring, explanations, challenger routing, alert delivery, and lineage.
-
-### Backend Tests
+## Testing and code quality
 
 ```bash
-cd backend
-python -m pytest -v
+make lint typecheck test train-smoke audit
+make docker-build
+npx --prefix frontend playwright install chromium
+npm --prefix frontend run e2e
 ```
 
-All 20 backend tests run against an isolated SQLite test database and complete in seconds.
-
-### Browser End-to-End Tests
-
-```bash
-cd frontend
-npm ci
-npm run e2e
-```
-
-The Playwright suite starts the API and Vite app on isolated ports, creates a temporary SQLite database, applies Alembic migrations, and seeds the Customer Churn project. It exercises invitation acceptance, workspace audit filtering, live prediction and explanation, batch scoring, challenger setup, webhook delivery, and lineage navigation.
-
-### Linting & Formatting
-
-```bash
-# Python linting and formatting checks
-ruff check app tests
-ruff format --check app tests
-
-# Frontend linting and type checking
-cd frontend
-npm run lint
-npm run build
-```
-
----
+The browser suite builds the frontend, applies Alembic migrations to an isolated SQLite database, and exercises invitation, monitoring, scoring, and lineage flows. GitHub Actions validates both Compose configurations and builds the images before testing PostgreSQL, Redis, Celery, MLflow, and prediction through the frontend proxy.
 
 ## Core Capabilities
 

@@ -26,6 +26,13 @@ class TrainingJob(Base, UUIDMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_training_jobs_project_created", "project_id", "created_at"),
         Index("ix_training_jobs_status", "status"),
+        Index(
+            "uq_training_jobs_idempotency",
+            "project_id",
+            "created_by",
+            "idempotency_key",
+            unique=True,
+        ),
         Index("ix_training_jobs_dataset_version", "dataset_version_id"),
         Index("ix_training_jobs_retrain_source", "retrain_source_deployment_id"),
     )
@@ -42,6 +49,7 @@ class TrainingJob(Base, UUIDMixin, TimestampMixin):
     feature_columns: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     algorithms: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=JobStatus.QUEUED, nullable=False)
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status_message: Mapped[str | None] = mapped_column(String(255), nullable=True)

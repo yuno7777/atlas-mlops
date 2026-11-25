@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import get_settings
 from app.core.exceptions import ConflictError, NotFoundError
-from app.core.metrics import DRIFT_DETECTIONS
+from app.core.metrics import DRIFT_DETECTIONS, DRIFT_SIGNALS
 from app.db.session import SessionLocal
 from app.ml.algorithms import get_algorithm, validate_hyperparameters
 from app.ml.drift import analyze_drift
@@ -124,6 +124,9 @@ def analyze_deployment(db: Session, deployment: Deployment) -> MonitoringResult:
     db.add(result)
     db.flush()
     DRIFT_DETECTIONS.labels(deployment_id=deployment.id, status=result.status).inc()
+    for signal in ("data", "prediction", "concept"):
+        if outcome[f"{signal}_drift_detected"]:
+            DRIFT_SIGNALS.labels(deployment_id=deployment.id, signal=signal).inc()
     if result.status in {"warning", "critical"} and (
         previous is None or previous.status != result.status
     ):

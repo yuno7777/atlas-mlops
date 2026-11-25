@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 import threading
 import time
 import zlib
@@ -24,9 +25,11 @@ from app.core.exceptions import (
     ServiceUnavailableError,
     ValidationError,
 )
+from app.core.logging import request_id_ctx
 from app.core.metrics import PREDICTION_LATENCY, PREDICTIONS
 from app.core.rate_limit import rate_limiter
 from app.core.security import api_key_matches, generate_request_id
+from app.ml.executor import InferenceExecutor
 from app.ml.inference import run_predictions, validate_records
 from app.models.deployment import Deployment, PredictionLog
 from app.models.enums import DeploymentStatus
@@ -42,7 +45,7 @@ from app.schemas.prediction import (
 )
 from app.services.access import require_project
 from app.services.deployments import authenticate_api_key
-from app.services.storage import get_storage
+from app.services.storage import ArtifactIntegrityError, copy_verified, get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,30 @@ class LoadedModel:
     pipeline: Pipeline
     reference_profile: dict[str, Any]
     problem_type: str
+
+
+@dataclass(frozen=True)
+class ModelArtifact:
+    id: str
+    key: str
+    sha256: str
+    reference_profile: dict[str, Any]
+    problem_type: str
+
+    @classmethod
+    def from_version(cls, version: ModelVersion) -> ModelArtifact:
+        reference_profile = version.reference_profile or {}
+        problem_type = str(
+            reference_profile.get("problem_type")
+            or (version.experiment.problem_type if version.experiment else "classification")
+        )
+        return cls(
+            version.id,
+            version.artifact_key,
+            version.artifact_sha256,
+            reference_profile,
+            problem_type,
+        )
 
 
 class ModelCache:
@@ -77,7 +104,10 @@ class ModelCache:
             return True
 
     def get_or_load(self, version: ModelVersion) -> LoadedModel:
-        key = self._key(version.id, version.artifact_sha256)
+        return self.load_artifact(ModelArtifact.from_version(version))
+
+    def load_artifact(self, artifact: ModelArtifact) -> LoadedModel:
+        key = self._key(artifact.id, artifact.sha256)
         with self._lock:
             entry = self._entries.get(key)
             if entry is not None:
@@ -85,7 +115,7 @@ class ModelCache:
                     self._entries.move_to_end(key)
                     return entry[0]
                 self._entries.pop(key, None)
-        loaded = self._load(version)
+        loaded = self._load(artifact)
         with self._lock:
             self._entries[key] = (loaded, time.monotonic())
             self._entries.move_to_end(key)
@@ -93,37 +123,24 @@ class ModelCache:
                 self._entries.popitem(last=False)
         return loaded
 
-    def _load(self, version: ModelVersion) -> LoadedModel:
-        storage = get_storage()
-        if not storage.exists(version.artifact_key):
-            raise ServiceUnavailableError("The deployed model artifact is unavailable.")
-        actual_digest = storage.sha256(version.artifact_key)
-        if actual_digest != version.artifact_sha256:
-            logger.error(
-                "Model artifact digest mismatch",
-                extra={"version_id": version.id, "expected": version.artifact_sha256},
-            )
-            raise ServiceUnavailableError("The deployed model artifact failed an integrity check.")
+    def _load(self, artifact: ModelArtifact) -> LoadedModel:
         try:
-            with storage.open_path(version.artifact_key) as path:
-                pipeline = joblib.load(path)
-        except Exception as exc:
-            logger.exception("Failed to load model artifact", extra={"version_id": version.id})
+            with tempfile.TemporaryFile() as snapshot:
+                copy_verified(get_storage(), artifact.key, artifact.sha256, snapshot)
+                pipeline = joblib.load(
+                    snapshot
+                )  # Registry artifacts come only from trusted workers.
+        except ArtifactIntegrityError as exc:
+            logger.error("Model artifact digest mismatch", extra={"version_id": artifact.id})
             raise ServiceUnavailableError(
-                f"The deployed model could not be loaded: {str(exc).splitlines()[0][:200]}"
+                "The deployed model artifact failed an integrity check."
             ) from exc
-        if not hasattr(pipeline, "predict"):
+        except Exception as exc:
+            logger.exception("Failed to load model artifact", extra={"version_id": artifact.id})
+            raise ServiceUnavailableError("The deployed model could not be loaded.") from exc
+        if not isinstance(pipeline, Pipeline):
             raise ServiceUnavailableError("The deployed artifact is not a usable model.")
-        reference_profile = version.reference_profile or {}
-        problem_type = str(
-            reference_profile.get("problem_type")
-            or (version.experiment.problem_type if version.experiment else "classification")
-        )
-        return LoadedModel(
-            pipeline=pipeline,
-            reference_profile=reference_profile,
-            problem_type=problem_type,
-        )
+        return LoadedModel(pipeline, artifact.reference_profile, artifact.problem_type)
 
     def invalidate_version(self, version_id: str) -> None:
         with self._lock:
@@ -216,6 +233,7 @@ def _log_failure(
         logger.exception("Could not persist failed prediction log")
         db.rollback()
     PREDICTIONS.labels(deployment_id=deployment.id, status="failure").inc()
+    PREDICTION_LATENCY.labels(deployment_id=deployment.id).observe(latency_ms / 1000)
 
 
 def resolve_prediction_access(
@@ -242,10 +260,11 @@ def predict(
     payload: PredictionRequest,
     *,
     client_ip: str | None,
+    inference: InferenceExecutor,
     request_id: str | None = None,
 ) -> PredictionResponse:
     settings = get_settings()
-    request_id = request_id or generate_request_id()
+    request_id = request_id or request_id_ctx.get() or generate_request_id()
     started = time.perf_counter()
     limiter_key = f"predict:{deployment.id}:{client_ip or 'unknown'}"
     try:
@@ -275,11 +294,16 @@ def predict(
         )
         raise ServiceUnavailableError(message)
 
-    variant, version = _select_variant(deployment, request_id)
+    variant, version = _select_variant(deployment, generate_request_id())
+    artifact = ModelArtifact.from_version(version)
+
+    def score() -> tuple[LoadedModel, list[dict[str, Any]]]:
+        model = get_model_cache().load_artifact(artifact)
+        frame = validate_records(payload.records, model.reference_profile)
+        return model, run_predictions(model.pipeline, model.problem_type, frame)
+
     try:
-        loaded = get_model_cache().get_or_load(version)
-        frame = validate_records(payload.records, loaded.reference_profile)
-        raw_predictions = run_predictions(loaded.pipeline, loaded.problem_type, frame)
+        loaded, raw_predictions = inference.run(score)
     except Exception as exc:
         error = (
             exc.message if isinstance(exc, (ValidationError, ServiceUnavailableError)) else str(exc)

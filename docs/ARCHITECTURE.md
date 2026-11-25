@@ -191,8 +191,8 @@ ARTIFACT_ROOT/
 ├── datasets/{dataset_id}/v{version}/{sha256}.{ext}
 ├── training/{job_id}/{experiment_id}/model.joblib
 ├── training/{job_id}/{experiment_id}/reference_profile.json
-├── registry/{registered_model_id}/v{version}/model.joblib
-└── registry/{registered_model_id}/v{version}/reference_profile.json
+├── registry/{registered_model_id}/v{version}/{model_version_id}/model.joblib
+└── registry/{registered_model_id}/v{version}/{model_version_id}/reference_profile.json
 ```
 
 Paths are relative keys in the database. Public APIs never expose filesystem paths;

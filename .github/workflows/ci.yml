@@ -6,135 +6,109 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  backend-lint:
-    name: Backend Lint & Format
+  backend:
+    name: Backend lint, types, tests and dependency audit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.13"
-
-      - name: Install Ruff
-        run: pip install ruff
-
-      - name: Run Ruff Linter
-        working-directory: backend
-        run: ruff check app tests e2e_server.py
-
-      - name: Run Ruff Formatter Check
-        working-directory: backend
-        run: ruff format --check app tests e2e_server.py
-
-  backend-tests:
-    name: Backend Test Suite
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: "pip"
-          cache-dependency-path: |
-            backend/requirements.txt
-            backend/requirements-dev.txt
-
-      - name: Install dependencies
+          python-version: "3.12"
+      - name: Install locked dependencies
         working-directory: backend
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      - name: Run Pytest
+          python -m pip install uv==0.13.9
+          uv venv
+          uv pip sync --require-hashes requirements.lock
+          uv pip install -c requirements.lock -r requirements-dev.txt
+      - name: Backend lint and format
         working-directory: backend
-        run: pytest -v
+        run: |
+          .venv/bin/ruff check app tests e2e_server.py ../scripts/compose_smoke.py
+          .venv/bin/ruff format --check app tests e2e_server.py ../scripts/compose_smoke.py
+      - name: Backend types
+        working-directory: backend
+        run: .venv/bin/python -m mypy app/core/config.py app/core/exceptions.py app/ml/executor.py app/schemas/prediction.py app/services/storage.py
+      - run: make test train-smoke
+      - name: Audit locked Python runtime dependencies
+        working-directory: backend
+        run: .venv/bin/pip-audit --disable-pip --require-hashes -r requirements.lock
 
-  frontend-checks:
-    name: Frontend Lint, Typecheck & Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Lint Frontend
-        working-directory: frontend
-        run: npm run lint
-
-      - name: Build & Typecheck Frontend
-        working-directory: frontend
-        run: npm run build
-
-  browser-e2e:
-    name: Browser End-to-End Tests
+  frontend:
+    name: Frontend lint, build, audit and browser tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.13"
-          cache: "pip"
-          cache-dependency-path: |
-            backend/requirements.txt
-            backend/requirements-dev.txt
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+          python-version: "3.12"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: "22"
-          cache: "npm"
+          node-version: "24"
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
-
-      - name: Install backend dependencies
-        working-directory: backend
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
-
-      - name: Install Chromium
+      - name: Lint, type-check, build and audit
         working-directory: frontend
-        run: npx playwright install --with-deps chromium
-
-      - name: Run browser end-to-end suite
+        run: |
+          npm run lint
+          npm run build
+          npm audit --audit-level=high
+      - name: Install locked API dependencies for browser tests
+        working-directory: backend
+        run: |
+          python -m pip install uv==0.13.9
+          uv venv
+          uv pip sync --require-hashes requirements.lock
+      - name: Install Chromium and run browser tests
         working-directory: frontend
-        env:
-          CI: "true"
-        run: npm run e2e
+        run: |
+          npx playwright install --with-deps chromium
+          npm run e2e
 
-  docker-validate:
-    name: Validate Docker Build & Compose Config
+  docker:
+    name: Docker build and Compose lifecycle
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DOMAIN: atlas.example.test
+      COMPOSE_PROJECT_NAME: atlas-ci
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Validate Docker Compose Config
-        run: docker compose config
-
-      - name: Validate Production Compose Config
-        env:
-          DOMAIN: atlas.example.com
-          SECRET_KEY: ci-only-secret-key-with-32-characters
-        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Generate ephemeral database and signing credentials
+        run: |
+          secret="$(openssl rand -hex 32)"
+          database_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$secret"
+          echo "::add-mask::$database_password"
+          echo "SECRET_KEY=$secret" >> "$GITHUB_ENV"
+          echo "POSTGRES_PASSWORD=$database_password" >> "$GITHUB_ENV"
+      - name: Validate both Compose configurations
+        run: |
+          docker compose config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+      - name: Build containers
+        run: make docker-build
+      - name: Run the containerized pipeline
+        run: |
+          docker compose up --no-build --wait --wait-timeout 180
+          python3 scripts/compose_smoke.py
+          docker compose exec -T backend python -c "import urllib.request; assert b'atlas_training_jobs_total' in urllib.request.urlopen('http://worker:9101/metrics', timeout=5).read()"
+      - name: Container logs
+        if: failure()
+        run: docker compose logs --tail 100
+      - name: Clean up test stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans

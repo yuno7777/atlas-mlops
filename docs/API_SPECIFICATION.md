@@ -135,6 +135,10 @@ Version detail (abridged):
 | GET | `/training-jobs/{id}/logs` | Logs (`after_id`, `limit`) |
 | POST | `/training-jobs/{id}/cancel` | Request cooperative cancellation |
 
+Send an optional `Idempotency-Key` header when retries are possible. Repeating the
+same validated request returns the existing job. Reusing the key with different
+parameters returns `409`. Keys are scoped to the project and submitting account.
+
 Create request:
 
 ```json
@@ -273,6 +277,8 @@ to evaluate the quality gate; until then the rollout waits for enough labeled ro
 ## Predictions
 
 ### POST `/predictions/{deployment_id}`
+
+The JSON body accepts tabular scalar values and rejects nested values or unknown request fields. Request size defaults to 2 MiB. Scoring saturation yields `503 inference_busy` and the configured scoring deadline yields `504 inference_timeout`. The response and `X-Request-ID` header carry the same request identifier.
 
 Auth: `X-API-Key` or JWT. Body:
 

@@ -1,184 +1,75 @@
-# Deployment
+# Deployment runbook
 
-## Local Development (Docker Compose — recommended)
+## Local Compose
 
-Prerequisites: Docker Desktop/Engine 24+, 8 GB RAM available, free ports 3000, 8000,
-5000, 5432, 6379.
+Use Docker Engine or Desktop with Compose v2.24.4 or newer. Allow roughly 5 GB of container memory for the full stack. For a low-resource workstation, use the SQLite quickstart in the [README](../README.md).
 
 ```bash
 cp .env.example .env
-# edit SECRET_KEY and database passwords; defaults are development-only
-docker compose up -d --build
+# Set a different random hex value for SECRET_KEY and POSTGRES_PASSWORD.
+CODE_REVISION=$(git rev-parse HEAD) docker compose up -d --build --wait
+curl -fsS http://127.0.0.1:8000/ready
+python3 scripts/compose_smoke.py
 ```
 
-Services:
+Compose binds the UI, API, MLflow, PostgreSQL, and Redis host ports to loopback. The smoke check uses the UI proxy on port 3000 and creates a test account. The production overlay unpublishes those ports and exposes Caddy on TCP 80 and 443, plus UDP 443.
 
-| Service | URL | Notes |
-|---|---|---|
-| Frontend | http://localhost:3000 | Nginx + built SPA |
-| API | http://localhost:8000/api/v1/docs | OpenAPI/Swagger |
-| MLflow | http://localhost:5000 | Tracking UI |
-| PostgreSQL | localhost:5432 | `atlas` database |
-| Redis | localhost:6379 | Broker (not exposed by default in compose? kept internal) |
+## Public single-node installation
 
-First run:
+1. Point DNS at the host and set `DOMAIN`, `SECRET_KEY`, and `POSTGRES_PASSWORD` in `.env`. Use a separate random value for each secret. Use URL-safe characters for the database password because Compose embeds it in a connection URL.
+2. For the initial account, temporarily set `ATLAS_PRODUCTION_ALLOW_REGISTRATION=true`. If the host is publicly reachable, restrict inbound access to the bootstrap operator during this window.
+3. Build and start the overlay, register through the UI, then set `ATLAS_PRODUCTION_ALLOW_REGISTRATION=false` and recreate the backend with the same two Compose files.
+4. Scrape telemetry only on the private network. Set `ATLAS_PRODUCTION_DOCS_ENABLED=true` explicitly if this host should expose interactive API docs.
 
 ```bash
-docker compose exec backend python -m app.cli seed-demo
+CODE_REVISION=$(git rev-parse HEAD) docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --wait
 ```
 
-Or register through the UI. To load the demo dataset and train models:
+The API trusts the forwarded client address in this overlay. Keep the API and frontend private behind Caddy and allow only trusted services on the Compose network. The application rate limiter and model cache are process-local. Plan shared rate limiting, a separate migration job, scoped database accounts, and a tested backup and restore process before moving to multiple nodes or accepting high-risk workloads.
+
+## Upgrading an existing installation
+
+Back up PostgreSQL metadata and the artifact volume together. Inventory any existing MLflow data before switching the tracking server to its separate database, `atlas_mlflow` by default. A one-shot Compose service creates that database on both new and existing PostgreSQL volumes. Preserve prior tracking artifacts and their original location until you have migrated and verified the tracking data. Set a distinct database name for MLflow and Atlas.
+
+The application images run as UID/GID 10001. Fresh managed volumes inherit the artifact directory ownership. For an existing root-owned volume, stop the stack, confirm the volume name, and back it up before giving the new application user ownership. Use the name reported by `docker volume ls` in place of the example below.
 
 ```bash
-python scripts/generate_demo_data.py
-docker compose exec -T backend python -m app.cli seed-demo
+make docker-build
+docker run --rm --user 0:0 --entrypoint chown \
+  -v atlas-mlops_artifacts_data:/data/artifacts \
+  atlas-backend:local -R 10001:10001 /data/artifacts
 ```
 
-Check health:
+The API container runs `alembic upgrade head` before starting Uvicorn. Confirm the applied revision with `docker compose exec backend alembic current`. Back up before downgrading. Plain `docker compose down` preserves volumes. The `--volumes` option deletes them.
+
+## Storage and model trust
+
+For S3, pass `STORAGE_BACKEND=s3`, `S3_BUCKET`, optional `S3_REGION` and `S3_ENDPOINT_URL`, and credentials or workload identity to both the API and worker through a deployment override. Use a private bucket with workload-scoped access and object versioning. To move MLflow artifacts separately, set its `--artifacts-destination` and grant the tracking process access.
+
+Atlas loads joblib models created by its own workers. Limit write access to the artifact store and registry database to trusted processes. A digest verifies that the stored artifact matches the registry record. A checksum provides no isolation from a compromised registry, storage writer, or training worker. Previously registered models retain their stored artifact locations and digests.
+
+## Failure response
+
+| Symptom | Check |
+| --- | --- |
+| `/ready` returns 503 | Inspect the named lifecycle, database, storage, or Redis check. Use `docker compose logs backend postgres redis` for context. |
+| Training remains queued | Inspect `docker compose logs worker beat`. Beat reconciles older queued jobs and workers claim each job atomically. If a running worker is lost, stale-job recovery marks that run failed after the configured threshold. |
+| Tracking warning in a completed run | Check `docker compose logs mlflow mlflow-db-init`, tracking URI, and MLflow artifact permissions. The Atlas experiment and registry remain available independently. |
+| Prediction returns 503 or 504 | Check deployment status, verified model bytes, and inference worker saturation. A timed-out scoring thread holds its slot until it exits. Use the response's `X-Request-ID` to find its log. |
+| Drift metrics are empty | Check `ENABLE_MONITORING_SCHEDULER`, beat logs, the deployment sample threshold, and availability of labels. Scrape `backend:8000/metrics` and `worker:9101/metrics` from the internal network. |
+| Client tokens fail after rotation | A new `SECRET_KEY` invalidates existing JWTs. Sign in again after rolling the API to the new key. Deployment API keys have independent rotation. |
+
+MLflow usage telemetry defaults to disabled in Atlas and its images.
+
+The worker exporter aggregates Celery child-process counters. The API's SLO view is process-local, and its metrics reset on restart. Set `OTEL_EXPORTER_OTLP_ENDPOINT` for traces and collect JSON logs from both processes. Request logs carry `request_id`. Training logs carry `run_id` and the request ID when training came from an HTTP call.
+
+## Reproducing the build
+
+`backend/requirements.txt` contains direct pins. `backend/requirements.lock` contains Python 3.12 runtime pins and hashes. After changing requirements, regenerate it with the following command. Use `npm ci` to install exactly the frontend lockfile. Update Docker image tags and manifest digests together.
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/ready
-docker compose ps
+uv pip compile backend/requirements.txt --python-version 3.12 --universal --generate-hashes --output-file backend/requirements.lock
+make setup
+make lint typecheck test train-smoke audit
+make docker-build
 ```
-
-Artifacts persist in named volumes. `docker compose down` keeps data;
-`docker compose down -v` destroys databases and artifacts.
-
-## Production on a Single VPS (Caddy + TLS)
-
-The production override closes every port except 80 and 443. Caddy obtains a Let's
-Encrypt certificate for `DOMAIN` and proxies to the frontend; nginx forwards `/api` to
-the backend. A 4 GB RAM server is enough for the full stack with a small demo dataset.
-
-1. Point an A/AAAA record at the server and install Docker with the Compose plugin.
-2. Copy `.env.example` to `.env` and set the deployment values:
-
-```env
-DOMAIN=atlas.example.com
-SECRET_KEY=<32+ random characters>
-POSTGRES_PASSWORD=<strong password>
-```
-
-3. Start the stack with both compose files:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backend python -m app.cli seed-demo
-```
-
-4. Open `https://atlas.example.com`.
-
-The first Caddy start can take a minute while certificates are issued. Postgres, Redis,
-MLflow, and the API stay on the private Compose network. Keep `.env` out of git.
-
-## Configuration
-
-All configuration is environment-based (`backend/app/core/config.py`, `.env.example`).
-Key variables:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `SECRET_KEY` | dev placeholder | JWT signing; must be changed |
-| `DOMAIN` | none | Public hostname for the production Caddy override |
-| `DATABASE_URL` | postgres in compose | SQLAlchemy URL |
-| `REDIS_URL` | redis://redis:6379/0 | Celery broker/backend |
-| `JOB_EXECUTION_MODE` | thread (local), celery (compose) | Worker strategy |
-| `MLFLOW_TRACKING_URI` | http://mlflow:5000 | Tracking server |
-| `MLFLOW_ENABLED` | true | Disable for tests/degraded mode |
-| `ARTIFACT_ROOT` | /data/artifacts | Local artifact volume |
-| `STORAGE_BACKEND` | local | `local` or `s3` |
-| `MAX_UPLOAD_MB` | 100 | Upload limit |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | 720 | JWT lifetime |
-| `ENABLE_MONITORING_SCHEDULER` | false (api), true (beat) | Periodic scans |
-| `CORS_ORIGINS` | http://localhost:3000 | Allowed origins |
-| `RATE_LIMIT_PREDICTIONS_PER_MINUTE` | 120 | Per-deployment |
-| `OTEL_SERVICE_NAME` | atlas-api | OpenTelemetry resource service name |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | blank | Optional OTLP/HTTP collector base URL; blank disables trace export |
-| `LOG_LEVEL` | INFO | |
-
-When an OTLP endpoint is configured, the API exports request spans and accepts W3C
-`traceparent` context. The Monitoring view's SLO snapshot uses the process-local
-Prometheus registry and resets on API restart; durable multi-process SLO history needs
-a Prometheus server or remote metrics backend.
-
-Secrets are never baked into images. Compose reads `.env`; Kubernetes/ECS should use a
-secret manager. Rotate `SECRET_KEY` invalidates existing tokens; rotate deployment API
-keys per deployment.
-
-## Database Migrations
-
-```bash
-docker compose exec backend alembic upgrade head
-docker compose exec backend alembic current
-docker compose exec backend alembic downgrade base   # destructive, dev only
-```
-
-The API does not auto-create tables in production. The entrypoint waits for PostgreSQL
-and applies migrations (`scripts/entrypoint.sh`), which is safe for a single-node
-deployment. For multiple replicas, run migrations as a separate job.
-
-## AWS / S3 Artifact Storage
-
-The artifact MAL is storage-backend agnostic:
-
-```env
-STORAGE_BACKEND=s3
-S3_BUCKET=my-atlas-artifacts
-S3_REGION=us-east-1
-S3_ENDPOINT_URL=            # blank for AWS; set for MinIO
-S3_ACCESS_KEY_ID=...
-S3_SECRET_ACCESS_KEY=...
-```
-
-Use an IAM role/task role in production instead of static keys. Datasets and model
-artifacts are addressed by platform-generated keys; downloads still stream through the
-API so authorization and audit are preserved.
-
-Optional MinIO profile (local S3-compatible testing):
-
-```bash
-docker compose --profile s3 up -d
-```
-
-MLflow artifacts remain on a persistent volume by default. To use S3 for MLflow, set
-`--artifacts-destination s3://...` in the MLflow command and provide credentials; this
-is documented as a deployment variant, not enabled by default to keep local setup
-credential-free.
-
-## Production Topology (single node)
-
-- Reverse proxy (Nginx/ALB) terminating TLS to the frontend and API.
-- 1–N API replicas, 1–N Celery workers, 1 Celery beat, MLflow, PostgreSQL, Redis.
-- Managed PostgreSQL with backups/PITR; Redis with persistence.
-- Artifacts on S3 with versioning and lifecycle rules.
-- Prometheus scrapes `/metrics`; logs to stdout collected by the platform.
-- Run migrations as a release step before deploying API replicas.
-- Do not expose PostgreSQL, Redis, or the MLflow tracking port publicly; MLflow has no
-  built-in auth in server mode (see SECURITY.md).
-
-## GitHub Actions
-
-`ci.yml` runs on push/PR:
-
-1. `backend-lint`: Ruff.
-2. `backend-tests`: pytest with a SQLite test DB and MLflow disabled.
-3. `frontend-checks`: npm ci, lint, typecheck, tests, build.
-4. `docker-build`: builds both images and validates `docker compose config`.
-
-Deployment workflows (ECR push, ECS/Kubernetes rollout) are intentionally separate and
-not included with credentials. Documented as a next step.
-
-## Verification Checklist
-
-- [ ] `.env` created from example, secrets changed.
-- [ ] `docker compose up -d --build` healthy.
-- [ ] `/ready` returns 200 and reports DB/storage.
-- [ ] Alembic current revision matches head.
-- [ ] MLflow UI reachable, backend logs "tracking enabled".
-- [ ] Seed demo or register + upload.
-- [ ] Training job transitions queued → running → completed.
-- [ ] Model registered and deployed; prediction succeeds.
-- [ ] Monitoring scan produces a stored result.
-- [ ] Frontend all eight routes render with real data.
-- [ ] `docker compose down && docker compose up -d` preserves data.

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import contextlib
+import hashlib
 import json
 import logging
 import math
+import platform
 import tempfile
 from datetime import UTC, datetime, timedelta
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.exceptions import TrainingError
+from app.core.logging import request_id_ctx, run_id_ctx
 from app.core.metrics import ACTIVE_TRAINING_JOBS, EXPERIMENTS, TRAINING_JOBS
 from app.db.session import SessionLocal
 from app.ml.algorithms import get_algorithm
@@ -26,7 +29,12 @@ from app.ml.validation import read_dataframe
 from app.models.enums import ExperimentStatus, JobStatus
 from app.models.training import Experiment, TrainingJob, TrainingJobLog
 from app.repositories.training import TrainingRepository
-from app.services.storage import get_storage, training_artifact_prefix
+from app.services.storage import (
+    ArtifactIntegrityError,
+    copy_verified,
+    get_storage,
+    training_artifact_prefix,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,25 +78,26 @@ def _resolve_best(experiments: list[Experiment], problem_type: str) -> Experimen
 
 
 def _persist_artifacts(
-    job: TrainingJob, experiment: Experiment, pipeline: Pipeline, reference_profile: dict[str, Any]
-) -> tuple[str, str]:
+    job: TrainingJob,
+    experiment: Experiment,
+    pipeline: Pipeline,
+    reference_profile: dict[str, Any],
+    directory: Path,
+) -> tuple[str, list[Path]]:
     storage = get_storage()
     prefix = training_artifact_prefix(job.id, experiment.id)
-    with tempfile.TemporaryDirectory() as temp_directory:
-        directory = Path(temp_directory)
-        model_path = directory / "model.joblib"
-        reference_path = directory / "reference_profile.json"
-        joblib.dump(pipeline, model_path)
-        reference_path.write_text(json.dumps(reference_profile, indent=2), encoding="utf-8")
-        try:
-            reloaded = joblib.load(model_path)
-            if not hasattr(reloaded, "predict"):
-                raise TrainingError("Serialized model could not be validated.")
-        except Exception as exc:
-            raise TrainingError(f"Model artifact validation failed: {exc}") from exc
-        storage.put_file(f"{prefix}/model.joblib", model_path)
-        storage.put_file(f"{prefix}/reference_profile.json", reference_path)
-        return f"{prefix}/model.joblib", f"{prefix}/reference_profile.json"
+    model_path = directory / "model.joblib"
+    reference_path = directory / "reference_profile.json"
+    joblib.dump(pipeline, model_path)
+    with model_path.open("rb") as model_file:
+        reference_profile["provenance"]["model_sha256"] = hashlib.file_digest(
+            model_file, "sha256"
+        ).hexdigest()
+    reference_path.write_text(json.dumps(reference_profile, indent=2), encoding="utf-8")
+    model_key = f"{prefix}/model.joblib"
+    storage.put_file(model_key, model_path)
+    storage.put_file(f"{prefix}/reference_profile.json", reference_path)
+    return model_key, [model_path, reference_path]
 
 
 def _mark_job_failed(db: Session, job: TrainingJob, message: str) -> None:
@@ -127,6 +136,10 @@ def _workflow_steps(db: Session, job: TrainingJob, updates: dict[str, tuple[str,
 def execute_training_job(job_id: str) -> None:
     db = SessionLocal()
     job: TrainingJob | None = None
+    claimed = False
+    active = False
+    run_token = run_id_ctx.set(job_id)
+    request_token = request_id_ctx.set(None)
     try:
         repository = TrainingRepository(db)
         claimed = repository.claim_job(job_id, _now())
@@ -138,15 +151,36 @@ def execute_training_job(job_id: str) -> None:
         if job is None:
             db.rollback()
             return
+        request_id_ctx.set((job.config or {}).get("request_id"))
         ACTIVE_TRAINING_JOBS.inc()
+        active = True
+        logger.info("Training job claimed")
         _log(db, job, "Worker claimed the job; loading dataset.", level="info")
         _progress(db, job, 3, "Loading dataset")
         db.commit()
 
         dataset_version = job.dataset_version
         storage = get_storage()
-        with storage.open_path(dataset_version.storage_key) as dataset_path:
-            df = read_dataframe(dataset_path, dataset_version.original_filename)
+        with tempfile.TemporaryDirectory() as directory:
+            dataset_path = Path(directory) / "dataset"
+            try:
+                with dataset_path.open("w+b") as snapshot:
+                    copy_verified(
+                        storage, dataset_version.storage_key, dataset_version.checksum, snapshot
+                    )
+                df = read_dataframe(dataset_path, dataset_version.original_filename)
+            except ArtifactIntegrityError as exc:
+                raise TrainingError("Dataset version failed its integrity check.") from exc
+        provenance = {
+            "dataset_version_id": dataset_version.id,
+            "dataset_sha256": dataset_version.checksum,
+            "code_revision": get_settings().code_revision,
+            "python": platform.python_version(),
+            "packages": {
+                name: version(name)
+                for name in ("scikit-learn", "numpy", "pandas", "scipy", "joblib", "pyarrow")
+            },
+        }
         _workflow_steps(
             db,
             job,
@@ -236,31 +270,31 @@ def execute_training_job(job_id: str) -> None:
                     selection.get("hyperparameters", {}),
                     training_config,
                 )
-                artifact_key, reference_key = _persist_artifacts(
-                    job, experiment, result.pipeline, result.reference_profile
-                )
                 for warning in result.warnings:
                     _record_tracking_failure(db, job, warning)
-
-                run_id = None
-                tracking_warning = None
+                result.reference_profile["provenance"] = provenance.copy()
                 with tempfile.TemporaryDirectory() as temp_directory:
-                    directory = Path(temp_directory)
-                    model_path = directory / "model.joblib"
-                    reference_path = directory / "reference_profile.json"
-                    joblib.dump(result.pipeline, model_path)
-                    reference_path.write_text(
-                        json.dumps(result.reference_profile, indent=2), encoding="utf-8"
+                    artifact_key, artifact_paths = _persist_artifacts(
+                        job,
+                        experiment,
+                        result.pipeline,
+                        result.reference_profile,
+                        Path(temp_directory),
                     )
                     run_id, tracking_warning = tracker.log_run(
                         experiment_name=f"atlas-{project_slug}",
                         run_name=experiment.name,
                         params=experiment.params,
                         metrics=result.metrics,
-                        tags=format_tracking_tags(
-                            job.id, job.project_id, job.dataset_version_id, job.problem_type
-                        ),
-                        artifact_paths=[model_path, reference_path],
+                        tags={
+                            **format_tracking_tags(
+                                job.id, job.project_id, job.dataset_version_id, job.problem_type
+                            ),
+                            "atlas.experiment_id": experiment.id,
+                            "atlas.dataset_sha256": dataset_version.checksum,
+                            "atlas.code_revision": provenance["code_revision"],
+                        },
+                        artifact_paths=artifact_paths,
                         model_pipeline=result.pipeline,
                     )
                 if tracking_warning:
@@ -372,18 +406,19 @@ def execute_training_job(job_id: str) -> None:
                 try:
                     from app.services.registry import register_experiment_as_model
 
-                    version = register_experiment_as_model(
-                        db,
-                        experiment_id=best.id,
-                        user_id=job.created_by,
-                        model_name=str(register_name),
-                        description=f"Auto-registered from training job {job.name}",
-                        commit=False,
-                    )
+                    with db.begin_nested():
+                        model_version = register_experiment_as_model(
+                            db,
+                            experiment_id=best.id,
+                            user_id=job.created_by,
+                            model_name=str(register_name),
+                            description=f"Auto-registered from training job {job.name}",
+                            commit=False,
+                        )
                     _log(
                         db,
                         job,
-                        f"Auto-registered best run as {version.registered_model.name} v{version.version}.",
+                        f"Auto-registered best run as {model_version.registered_model.name} v{model_version.version}.",
                     )
                 except Exception as exc:
                     logger.exception("Auto-registration failed", extra={"job_id": job.id})
@@ -424,7 +459,7 @@ def execute_training_job(job_id: str) -> None:
         logger.exception("Training runner crashed", extra={"job_id": job_id})
         db.rollback()
         try:
-            if job is None:
+            if claimed and job is None:
                 job = TrainingRepository(db).get_job_detail(job_id)
             if job is not None and job.status not in {
                 JobStatus.COMPLETED,
@@ -461,8 +496,11 @@ def execute_training_job(job_id: str) -> None:
             except Exception:
                 logger.exception("Could not finalize workflow run", extra={"job_id": job_id})
                 db.rollback()
-        with contextlib.suppress(Exception):
+        if active:
             ACTIVE_TRAINING_JOBS.dec()
+            logger.info("Training worker finished")
+        request_id_ctx.reset(request_token)
+        run_id_ctx.reset(run_token)
         db.close()
 
 
@@ -475,20 +513,26 @@ def _format_metrics(metrics: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def recover_stale_jobs(settings_override: Any | None = None) -> int:
+def recover_stale_jobs() -> int:
     settings = get_settings()
-    cutoff = datetime.now(UTC) - timedelta(minutes=settings.stale_job_after_minutes)
+    stale_after = timedelta(minutes=settings.stale_job_after_minutes)
+    if settings.job_execution_mode == "celery":
+        from app.workers.celery_app import VISIBILITY_TIMEOUT_SECONDS
+
+        stale_after = max(stale_after, timedelta(seconds=VISIBILITY_TIMEOUT_SECONDS))
+    cutoff = datetime.now(UTC) - stale_after
     db = SessionLocal()
     try:
         stale = (
             db.query(TrainingJob)
             .filter(TrainingJob.status == JobStatus.RUNNING, TrainingJob.started_at < cutoff)
+            .with_for_update(skip_locked=True)
             .all()
         )
         for job in stale:
             job.status = JobStatus.FAILED
             job.error_message = (
-                "Job was marked as failed by startup recovery after exceeding the stale threshold."
+                "Job was marked as failed by recovery after exceeding the stale threshold."
             )
             job.completed_at = _now()
             job.progress = min(job.progress, 99)

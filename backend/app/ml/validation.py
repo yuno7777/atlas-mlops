@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from codecs import getincrementaldecoder
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,8 @@ def validate_content_type(content_type: str | None) -> None:
 
 
 def sniff_file(path: Path, extension: str) -> None:
-    head = path.open("rb").read(8)
+    with path.open("rb") as handle:
+        head = handle.read(4096)
     if not head:
         raise DatasetValidationError("Uploaded file is empty.")
     if extension == ".parquet" and not head.startswith(b"PAR1"):
@@ -55,7 +57,7 @@ def sniff_file(path: Path, extension: str) -> None:
             raise DatasetValidationError("File is not valid JSON (expected an object or array).")
     if extension == ".csv":
         try:
-            path.open("rb").read(4096).decode("utf-8")
+            getincrementaldecoder("utf-8-sig")().decode(head, final=len(head) < 4096)
         except UnicodeDecodeError as exc:
             raise DatasetValidationError(
                 "CSV must be UTF-8 encoded. Re-export the file as UTF-8 and try again."
