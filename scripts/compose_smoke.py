@@ -1,10 +1,11 @@
-"""Exercise the running Compose stack through the frontend proxy."""
+"""Exercise Atlas through HTTP on a running Compose or native API."""
 
 from __future__ import annotations
 
 import json
 import secrets
 import time
+from functools import partial
 from http.client import HTTPConnection
 from itertools import islice
 from pathlib import Path
@@ -13,7 +14,8 @@ from typing import Any
 API = "/api/v1"
 
 
-def request(
+def request_json(
+    port: int,
     path: str,
     *,
     data: dict[str, Any] | bytes | None = None,
@@ -22,7 +24,7 @@ def request(
     request_headers = {"Content-Type": "application/json", **(headers or {})}
     if isinstance(data, dict):
         data = json.dumps(data).encode()
-    connection = HTTPConnection("127.0.0.1", 3000, timeout=15)
+    connection = HTTPConnection("127.0.0.1", port, timeout=15)
     try:
         connection.request("POST" if data is not None else "GET", path, data, request_headers)
         with connection.getresponse() as response:
@@ -35,22 +37,26 @@ def request(
         connection.close()
 
 
-def main() -> None:
+def run_lifecycle(*, port: int, execution_mode: str) -> None:
+    request = partial(request_json, port)
     readiness = request("/ready")
     assert readiness["status"] == "ready", readiness
-    assert any(item["name"] == "redis" for item in readiness["checks"]), readiness
+    if execution_mode == "celery":
+        assert any(item["name"] == "redis" for item in readiness["checks"]), readiness
 
     suffix = secrets.token_hex(6)
     account = request(
         f"{API}/auth/register",
         data={
-            "email": f"compose-{suffix}@example.com",
+            "email": f"smoke-{suffix}@example.com",
             "password": secrets.token_urlsafe(24),
-            "full_name": "Compose Smoke",
-            "workspace_name": f"Compose Smoke {suffix}",
+            "full_name": "Atlas Smoke",
+            "workspace_name": f"Atlas Smoke {suffix}",
         },
     )
     headers = {"Authorization": f"Bearer {account['access_token']}"}
+    system = request(f"{API}/system/info", headers=headers)
+    assert system["execution_mode"] == execution_mode, system
     workspace = request(f"{API}/workspaces", headers=headers)[0]
     project = request(
         f"{API}/workspaces/{workspace['id']}/projects",
@@ -67,7 +73,7 @@ def main() -> None:
     ]
     parts.extend(
         [
-            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="churn.csv"\r\n'
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="churn café.csv"\r\n'
             "Content-Type: text/csv\r\n\r\n".encode(),
             sample,
             f"\r\n--{boundary}--\r\n".encode(),
@@ -96,7 +102,8 @@ def main() -> None:
         job = request(f"{API}/training-jobs/{job['id']}", headers=headers)
     assert job["status"] == "completed", job
     experiment = job["experiments"][0]
-    assert experiment["mlflow_run_id"] and not experiment["tracking_warning"], experiment
+    if execution_mode == "celery":
+        assert experiment["mlflow_run_id"] and not experiment["tracking_warning"], experiment
 
     version = request(
         f"{API}/models",
@@ -111,11 +118,13 @@ def main() -> None:
     result = request(
         f"{API}/predictions/{deployment['id']}",
         data={"records": [{"tenure_months": 5, "monthly_charges": 70.0}]},
-        headers={"X-API-Key": deployment["api_key"], "X-Request-ID": f"compose-{suffix}"},
+        headers={"X-API-Key": deployment["api_key"], "X-Request-ID": f"smoke-{suffix}"},
     )
-    assert result["request_id"] == f"compose-{suffix}" and len(result["predictions"]) == 1, result
-    print("Compose pipeline passed: upload, Celery training, MLflow, registry, and prediction.")
+    assert result["request_id"] == f"smoke-{suffix}" and len(result["predictions"]) == 1, result
+    print(
+        f"Atlas lifecycle passed with {execution_mode}: upload, training, registry, and prediction."
+    )
 
 
 if __name__ == "__main__":
-    main()
+    run_lifecycle(port=3000, execution_mode="celery")

@@ -14,8 +14,8 @@ setup:
 	npm --prefix frontend ci
 
 lint:
-	cd backend && $(VENV)/bin/ruff check app tests e2e_server.py ../scripts/compose_smoke.py
-	cd backend && $(VENV)/bin/ruff format --check app tests e2e_server.py ../scripts/compose_smoke.py
+	cd backend && $(VENV)/bin/ruff check app tests e2e_server.py ../atlas.py ../scripts/compose_smoke.py
+	cd backend && $(VENV)/bin/ruff format --check app tests e2e_server.py ../atlas.py ../scripts/compose_smoke.py
 	npm --prefix frontend run lint
 
 typecheck:

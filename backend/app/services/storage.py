@@ -73,24 +73,27 @@ class LocalStorage:
             raise ValueError("Storage key escapes the artifact root")
         return path
 
-    def put_file(self, key: str, source: Path) -> None:
+    @contextlib.contextmanager
+    def _atomic_writer(self, key: str) -> Iterator[BinaryIO]:
         destination = self._resolve(key)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
-            temp_path = Path(handle.name)
-            try:
-                with source.open("rb") as source_handle:
-                    shutil.copyfileobj(source_handle, handle)
-                handle.close()
-                temp_path.replace(destination)
-            finally:
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
+                temp_path = Path(handle.name)
+                yield handle
+            temp_path.replace(destination)
+        finally:
+            if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
 
+    def put_file(self, key: str, source: Path) -> None:
+        with source.open("rb") as source_handle, self._atomic_writer(key) as handle:
+            shutil.copyfileobj(source_handle, handle)
+
     def put_bytes(self, key: str, data: bytes) -> None:
-        with tempfile.NamedTemporaryFile() as handle:
+        with self._atomic_writer(key) as handle:
             handle.write(data)
-            handle.flush()
-            self.put_file(key, Path(handle.name))
 
     def read_bytes(self, key: str) -> bytes:
         path = self._resolve(key)
