@@ -101,22 +101,31 @@ Monitor live feature distributions, output score shift, and statistical drift al
 
 ## Local quickstart
 
-For a CPU-only run, use Python 3.12, [uv](https://docs.astral.sh/uv/), Node.js 24, and GNU Make. On Windows, use WSL for the commands below.
+Use Python 3.12, [uv](https://docs.astral.sh/uv/), and Node.js 24. Run these commands
+from the repository root in PowerShell on Windows or Bash on Linux.
 
 ```bash
-make setup
-make train-smoke
-make serve
+python -m atlas setup
+python -m atlas doctor
+python -m atlas train-smoke
+python -m atlas dev
 ```
 
-The smoke test runs the full lifecycle on 30 synthetic rows with SQLite and an in-process worker. It uploads and validates data, trains two small classifiers, registers and deploys the best run, sends predictions and feedback, and exercises monitoring and retraining. It needs no Docker, Redis, or remote tracking service.
+Open [the UI](http://127.0.0.1:5173) to create a workspace or
+[the API docs](http://127.0.0.1:8000/api/v1/docs) to work directly with the API.
+The native smoke runs real migrations and a train-to-predict lifecycle over HTTP
+using 96 synthetic rows, SQLite, local artifact storage, and the in-process background
+worker. It uses temporary state and starts an isolated loopback API.
 
-The standalone API serves [readiness](http://127.0.0.1:8000/ready) and [OpenAPI docs](http://127.0.0.1:8000/api/v1/docs). Run `npm --prefix frontend run dev` for the UI at [localhost:5173](http://localhost:5173). To populate it with the local demo, run this after the database migration performed by `make serve`.
+Use `python -m atlas serve` for the API alone or `python -m atlas test` for the
+backend suite. Pass `--data-dir`, `--api-port`, or `--ui-port` where applicable.
+Native commands store data in `backend/data` by default and generate a fresh signing key
+at startup, so existing browser sessions need to sign in again after a restart.
+Compose continues to use its own deployment settings.
 
-```bash
-cd backend
-MLFLOW_ENABLED=false .venv/bin/python -m app.cli seed-demo
-```
+To seed a local demo account and deployment, run `python -m atlas seed-demo`
+before starting the UI. Pass the same `--data-dir` to both commands if you changed
+the default.
 
 The demo account is `demo@atlasmlops.dev` with password `demo-password-123`. Use it only on your development instance.
 
@@ -244,6 +253,8 @@ The browser suite builds the frontend, applies Alembic migrations to an isolated
 ## Repository Documentation
 
 Detailed engineering documentation and architecture decision records:
+
+- [Atlas delivery goal](docs/ROADMAP.md) tracks the Windows/Linux milestones and acceptance checks.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): System architecture, process boundaries, and concurrency model.
 - [docs/API_SPECIFICATION.md](docs/API_SPECIFICATION.md): REST endpoints, request/response schemas, and error codes.
