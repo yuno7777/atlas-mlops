@@ -91,9 +91,17 @@ before deploying it so all active executions use the new policy.
 | `max_attempts` | `TRAINING_MAX_ATTEMPTS` (2) | Total attempts for worker losses and transient execution failures. Training and validation errors are terminal. |
 | `retry_backoff_seconds` | 5 | Delay before the first execution retry. Later retries double that delay up to 300 seconds. Reconciliation can add scheduling latency. |
 
-Once either deadline passes, recovery can end the job and the old worker loses
-permission to commit results. Native estimator code can keep running until it
-returns. The deadline does not forcibly interrupt a Python thread.
+Windows, Linux, and Celery workers run each fit in a subprocess. The supervisor
+checks the execution lease and cancellation flag twice a second while the database
+is responsive. It terminates a cancelled or expired fit, escalates to a kill if
+the process is still alive after two seconds, and waits for the process to exit.
+It rechecks the lease before publishing a result. The fit process exits when its
+supervisor's control pipe closes.
+
+Fit subprocesses receive a private dataset snapshot and the estimator configuration.
+Database, Redis, tracking, and artifact storage access stay in the supervisor.
+If the worker dies before cleanup, the temporary snapshot and unpublished fit files
+can remain on disk. Include the worker's temporary directory in cleanup procedures.
 
 ## Storage and model trust
 

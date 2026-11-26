@@ -27,9 +27,8 @@ from app.db.session import SessionLocal
 from app.ml.algorithms import get_algorithm
 from app.ml.evaluation import METRIC_DIRECTIONS, primary_metric
 from app.ml.tracking import MLflowTracker, format_tracking_tags
-from app.ml.training import TrainingConfig, train_algorithm
+from app.ml.training import TrainingConfig
 from app.ml.utils import float_or_none
-from app.ml.validation import read_dataframe
 from app.models.enums import ExperimentStatus, JobStatus
 from app.models.modelops import WorkflowRun
 from app.models.training import Experiment, TrainingDispatch, TrainingJob, TrainingJobLog
@@ -41,7 +40,8 @@ from app.services.storage import (
     get_storage,
     training_artifact_prefix,
 )
-from app.workers.training_lease import LeaseLost, TrainingLease
+from app.workers.fit_process import run_fit
+from app.workers.training_lease import FitCancelled, LeaseLost, TrainingLease
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,7 @@ def execute_training_job(job_id: str) -> None:
     lease = TrainingLease(job_id, get_settings().training_lease_seconds)
     claimed = False
     active = False
+    snapshot_directory: tempfile.TemporaryDirectory | None = None
     run_token = run_id_ctx.set(job_id)
     request_token = request_id_ctx.set(None)
     try:
@@ -185,16 +186,15 @@ def execute_training_job(job_id: str) -> None:
 
         dataset_version = job.dataset_version
         storage = get_storage()
-        with tempfile.TemporaryDirectory() as directory:
-            dataset_path = Path(directory) / "dataset"
-            try:
-                with dataset_path.open("w+b") as snapshot:
-                    copy_verified(
-                        storage, dataset_version.storage_key, dataset_version.checksum, snapshot
-                    )
-                df = read_dataframe(dataset_path, dataset_version.original_filename)
-            except ArtifactIntegrityError as exc:
-                raise TrainingError("Dataset version failed its integrity check.") from exc
+        snapshot_directory = tempfile.TemporaryDirectory(prefix="atlas-training-")
+        dataset_path = Path(snapshot_directory.name) / "dataset"
+        try:
+            with dataset_path.open("w+b") as snapshot:
+                copy_verified(
+                    storage, dataset_version.storage_key, dataset_version.checksum, snapshot
+                )
+        except ArtifactIntegrityError as exc:
+            raise TrainingError("Dataset version failed its integrity check.") from exc
         provenance = {
             "dataset_version_id": dataset_version.id,
             "dataset_sha256": dataset_version.checksum,
@@ -211,7 +211,7 @@ def execute_training_job(job_id: str) -> None:
             {
                 "validate": (
                     "completed",
-                    f"Validated {len(df):,} rows and {len(df.columns)} columns.",
+                    "Dataset snapshot matches its registered checksum.",
                 ),
                 "prepare": (
                     "running",
@@ -222,7 +222,7 @@ def execute_training_job(job_id: str) -> None:
         _log(
             db,
             job,
-            f"Loaded dataset version {dataset_version.version} with {len(df):,} rows and {len(df.columns)} columns.",
+            f"Verified dataset version {dataset_version.version} with {dataset_version.row_count:,} registered rows.",
         )
         _progress(db, job, 8, "Preparing experiments")
         lease.commit(db)
@@ -296,11 +296,13 @@ def execute_training_job(job_id: str) -> None:
             lease.commit(db)
 
             try:
-                result = train_algorithm(
-                    df,
-                    spec,
+                result = run_fit(
+                    dataset_path,
+                    dataset_version.original_filename,
+                    spec.id,
                     selection.get("hyperparameters", {}),
                     training_config,
+                    check_active=lease.check_fitting,
                 )
                 # Fitting may outlive the worker's lease. Check ownership before writing
                 # attempt-specific files, then verify again before exposing their keys.
@@ -352,6 +354,8 @@ def execute_training_job(job_id: str) -> None:
                     f"{spec.label} completed in {result.duration_seconds:.1f}s. "
                     f"{_format_metrics(result.metrics)}",
                 )
+            except FitCancelled:
+                break
             except LeaseLost:
                 raise
             except TrainingError as exc:
@@ -535,6 +539,11 @@ def execute_training_job(job_id: str) -> None:
     finally:
         db.close()
         lease.close()
+        if snapshot_directory is not None:
+            try:
+                snapshot_directory.cleanup()
+            except OSError:
+                logger.warning("Could not remove training snapshot", extra={"job_id": job_id})
         if active:
             ACTIVE_TRAINING_JOBS.dec()
             logger.info("Training worker finished")

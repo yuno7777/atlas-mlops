@@ -101,7 +101,7 @@ sequenceDiagram
   W->>D: job → running
   W->>S: load dataset version
   loop each algorithm
-    W->>W: build pipeline, fit, evaluate, cross-validate
+    W->>W: supervise subprocess for fitting and evaluation
     W->>M: log params/metrics/artifact (run)
     W->>S: persist joblib + reference profile
     W->>D: insert experiment + log + progress
@@ -109,15 +109,16 @@ sequenceDiagram
   W->>D: job → completed/failed + timestamps
 ```
 
-- In Docker Compose, `JOB_EXECUTION_MODE=celery`; Redis is the broker and Celery Beat
-  schedules monitoring scans.
+- In Docker Compose, `JOB_EXECUTION_MODE=celery` uses Redis as the broker. Celery Beat
+  schedules monitoring and reconciliation.
 - For local development or tests, `JOB_EXECUTION_MODE=thread` uses a bounded
   `ThreadPoolExecutor` and the same `TrainingRunner` service. `JOB_EXECUTION_MODE=sync`
   executes inline for deterministic tests. The execution contract is identical.
 - Each job is claimed atomically (`UPDATE ... WHERE status='queued'`) to avoid duplicate
   execution if a task is delivered twice. Progress and logs are committed frequently.
-- Cancellation is a flag checked between algorithms and stages. It is cooperative by
-  design; forcibly killing a worker mid-fit can corrupt state.
+- The training worker supervises a subprocess for each fit. It checks cancellation
+  and lease ownership during fitting and stops the process when ownership ends.
+  The supervisor owns job state, external storage, tracking, and registry commits.
 
 ## 5. Model Serving
 
