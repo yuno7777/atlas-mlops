@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.exceptions import (
     ConflictError,
     NotFoundError,
@@ -31,6 +32,7 @@ from app.schemas.experiment import (
     ExperimentSummary,
 )
 from app.schemas.training import (
+    TrainingExecutionPolicy,
     TrainingJobCreateRequest,
     TrainingJobDetail,
     TrainingJobLogOut,
@@ -153,9 +155,10 @@ def create_training_job(
     project, _role = require_project(db, user, payload.project_id, write=True)
     fingerprint = ""
     if idempotency_key is not None:
-        canonical = json.dumps(
-            payload.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-        )
+        request_data = payload.model_dump(mode="json")
+        if payload.execution_policy is None:
+            request_data.pop("execution_policy")
+        canonical = json.dumps(request_data, sort_keys=True, separators=(",", ":"))
         fingerprint = hashlib.sha256(canonical.encode()).hexdigest()
         replay = _find_replay(db, user, project.id, idempotency_key, fingerprint)
         if replay is not None:
@@ -226,7 +229,11 @@ def create_training_job(
         f"{dataset_version.dataset.name} · {problem_type} · "
         f"{datetime.now(UTC).strftime('%b %d, %H:%M')}"
     )
+    execution_policy = (payload.execution_policy or TrainingExecutionPolicy()).model_dump()
+    if execution_policy["max_attempts"] is None:
+        execution_policy["max_attempts"] = get_settings().training_max_attempts
     config = {
+        "execution_policy": execution_policy,
         "test_size": payload.test_size,
         "random_seed": payload.random_seed,
         "cv_folds": payload.cv_folds,
@@ -338,6 +345,9 @@ def get_training_job(db: Session, user: User, job_id: str) -> TrainingJobDetail:
         config=job.config,
         error_message=job.error_message,
         cancel_requested=job.cancel_requested,
+        execution_attempt=job.execution_attempt,
+        execution_deadline_at=job.execution_deadline_at,
+        cancel_deadline_at=job.cancel_deadline_at,
         experiments=experiments,
         created_by=job.created_by,
     )
@@ -387,7 +397,11 @@ def cancel_training_job(
     if job is None:
         raise NotFoundError("Training job not found.")
     project, _role = require_project(db, user, job.project_id, write=True)
-    if not repository.request_cancellation(job.id, datetime.now(UTC)):
+    policy = TrainingExecutionPolicy.model_validate(job.config.get("execution_policy", {}))
+    now = datetime.now(UTC)
+    if not repository.request_cancellation(
+        job.id, now, now + timedelta(seconds=policy.cancel_grace_seconds)
+    ):
         raise ConflictError("This job has already finished.")
     db.add(
         TrainingJobLog(

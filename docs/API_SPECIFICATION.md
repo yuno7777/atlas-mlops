@@ -126,6 +126,12 @@ Version detail (abridged):
 
 ## Training
 
+`POST /training-jobs` accepts an optional `execution_policy` object with integer
+`timeout_seconds`, `cancel_grace_seconds`, `max_attempts`, and
+`retry_backoff_seconds`. Job details expose the resolved policy in `config`, the
+execution attempt, and any execution or cancellation deadlines. See the
+[deployment runbook](DEPLOYMENT.md#per-job-execution-policy) for timing and defaults.
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/algorithms` | Catalog (`problem_type` filter) |
