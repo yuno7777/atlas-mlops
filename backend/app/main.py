@@ -89,12 +89,14 @@ async def _monitoring_loop(interval: int) -> None:
         await asyncio.sleep(max(60, interval))
 
 
-async def _training_dispatch_loop(stop: asyncio.Event) -> None:
+async def _training_recovery_loop(stop: asyncio.Event, dispatch_locally: bool) -> None:
     while not stop.is_set():
         try:
-            await asyncio.to_thread(dispatch_due_training_jobs)
+            await asyncio.to_thread(recover_stale_jobs)
+            if dispatch_locally:
+                await asyncio.to_thread(dispatch_due_training_jobs)
         except Exception:
-            logger.exception("Local training dispatch reconciliation failed")
+            logger.exception("Training reconciliation failed")
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=15)
 
@@ -114,8 +116,10 @@ async def lifespan(app: FastAPI):
         logger.exception("Startup training-job recovery failed")
     dispatch_stop = asyncio.Event()
     dispatch_task = (
-        asyncio.create_task(_training_dispatch_loop(dispatch_stop))
-        if settings.job_execution_mode == "thread"
+        asyncio.create_task(
+            _training_recovery_loop(dispatch_stop, settings.job_execution_mode == "thread")
+        )
+        if settings.job_execution_mode in {"thread", "celery"}
         else None
     )
     scheduler_task = (

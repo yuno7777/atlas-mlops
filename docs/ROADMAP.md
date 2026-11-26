@@ -12,10 +12,12 @@ models deliberately, and be restored from backup.
 | 4. Serving and releases | Immutable release manifests, approval gates, shadow inference, resumable batch scoring, signed artifacts, retention, ONNX parity where supported, quotas, and cache budgets. | A trained candidate can be shadow-tested, approved, rolled out, and rolled back. Tampered artifacts fail closed and interrupted batch runs can resume. |
 | 5. Platform operations | Operator dashboards, drift investigation, alert deduplication, SDKs, UI timelines and dataset diff, scoped credentials, retention and redaction, backup and restore drills, SBOMs, image scanning, and upgrade checks. | Operators can diagnose a stuck run, restore models and metadata to a fresh deployment, and validate security and availability checks on a release. |
 
-Transactional dispatch is implemented in milestone 2. Regression coverage includes
-a failure after the API commits the job, a broker publish failure, a lost message,
-competing publishers, and cancellation after publishing. Worker execution leases,
-heartbeats, and recovery after a job starts are the next work in that milestone.
+Milestone 2 includes transactional dispatch, execution leases, heartbeats, a bounded
+worker-loss retry, and reuse of completed algorithm runs. Regression coverage includes
+failure after commit, lost broker messages, competing dispatchers, loss during fitting,
+cancellation, and rollback when ownership expires during registration. Next are
+per-job deadlines and retry policies, queue priorities, per-project resource limits,
+and failure drills against the deployed broker and worker.
 
 Native Windows and Linux runs use SQLite, local artifacts, and the thread worker.
 The Linux Compose profile keeps PostgreSQL, Redis, Celery, MLflow, and the production

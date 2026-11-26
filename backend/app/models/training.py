@@ -26,6 +26,7 @@ class TrainingJob(Base, UUIDMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_training_jobs_project_created", "project_id", "created_at"),
         Index("ix_training_jobs_status", "status"),
+        Index("ix_training_jobs_lease", "status", "lease_expires_at"),
         Index(
             "uq_training_jobs_idempotency",
             "project_id",
@@ -61,6 +62,9 @@ class TrainingJob(Base, UUIDMixin, TimestampMixin):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_token: Mapped[str | None] = mapped_column(String(36))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     dataset_version: Mapped[DatasetVersion] = relationship()  # noqa: F821
     project: Mapped[Project] = relationship()  # noqa: F821
