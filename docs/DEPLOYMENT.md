@@ -61,8 +61,21 @@ reconciliation every two minutes. A dispatcher can send more than one message ov
 a job's lifetime, and the atomic worker claim allows one to start training.
 Queued cancellation clears the dispatch record in the same transaction.
 
-This recovery covers jobs waiting for a worker. Loss after a worker has started
-training still follows the stale-job timeout.
+Migration `0006_training_leases` adds execution ownership. Drain workers and stop
+the previous API before applying this upgrade so all workers use the same ownership
+protocol. Jobs already running without a lease use the legacy stale-job timeout.
+
+Workers renew their lease every quarter of the configured duration, including during
+model fitting. The default `TRAINING_LEASE_SECONDS=120` gives a 30-second heartbeat.
+The API checks for lost workers every 15 seconds, and Celery beat also runs recovery.
+`TRAINING_MAX_ATTEMPTS=2` allows one replacement after the initial attempt. A
+replacement reuses completed algorithm runs and trains the remaining algorithms.
+A cancellation request or exhausted attempt budget ends the job instead.
+
+The job, experiment, workflow, and registry writes require a valid lease. Interrupted
+attempts may leave unreferenced files or MLflow runs if they lose ownership during an
+external write. Those files cannot be selected through an uncommitted experiment or
+registry version.
 
 ## Storage and model trust
 
@@ -75,7 +88,7 @@ Atlas loads joblib models created by its own workers. Limit write access to the 
 | Symptom | Check |
 | --- | --- |
 | `/ready` returns 503 | Inspect the named lifecycle, database, storage, or Redis check. Use `docker compose logs backend postgres redis` for context. |
-| Training remains queued | Inspect `docker compose logs worker beat`. Beat retries due database dispatch records. Native thread mode checks those records every 15 seconds. Workers clear the record when claiming the job. If a running worker is lost, stale-job recovery marks that run failed after the configured threshold. |
+| Training remains queued | Inspect `docker compose logs worker beat`. Beat retries due database dispatch records. Native thread mode checks those records every 15 seconds. Workers clear the record when claiming the job. Check the job log for an expired lease and replacement attempt. A second loss exhausts the default attempt budget. |
 | Tracking warning in a completed run | Check `docker compose logs mlflow mlflow-db-init`, tracking URI, and MLflow artifact permissions. The Atlas experiment and registry remain available independently. |
 | Prediction returns 503 or 504 | Check deployment status, verified model bytes, and inference worker saturation. A timed-out scoring thread holds its slot until it exits. Use the response's `X-Request-ID` to find its log. |
 | Drift metrics are empty | Check `ENABLE_MONITORING_SCHEDULER`, beat logs, the deployment sample threshold, and availability of labels. Scrape `backend:8000/metrics` and `worker:9101/metrics` from the internal network. |

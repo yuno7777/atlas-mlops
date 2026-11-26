@@ -2,18 +2,23 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Barrier
+from threading import Barrier, Event
 from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.models.training import TrainingDispatch
+from app.core.config import get_settings
+from app.db.session import SessionLocal
+from app.ml.training import train_algorithm
+from app.models.registry import ModelVersion, RegisteredModel
+from app.models.training import TrainingDispatch, TrainingJob
 from app.models.user import Project
-from app.services.training_runner import execute_training_job
+from app.services.training_runner import execute_training_job, recover_stale_jobs
 from app.workers.dispatch import dispatch_due_training_jobs, dispatch_training_job
+from app.workers.training_lease import LeaseLost, TrainingLease
 
 
 @pytest.fixture
@@ -126,3 +131,157 @@ def test_competing_dispatchers_and_cancellation(
         client.get(f"/api/v1/training-jobs/{job_id}", headers=auth_headers).json()["experiments"]
         == []
     )
+
+
+def _expire_worker(job_id: str) -> None:
+    with SessionLocal.begin() as db:
+        job = db.get(TrainingJob, job_id)
+        assert job is not None
+        job.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+
+def test_worker_heartbeat_keeps_idle_attempt_live(client, auth_headers, submission, monkeypatch):
+    monkeypatch.setattr("app.services.training.dispatch_training_job", Mock())
+    accepted = client.post("/api/v1/training-jobs", headers=auth_headers, json=submission)
+    assert accepted.status_code == 202, accepted.text
+    job_id = accepted.json()["id"]
+    extended = Event()
+    original_guard = TrainingLease.guard
+
+    def observe_heartbeat(lease, db):
+        original_guard(lease, db)
+        extended.set()
+
+    monkeypatch.setattr(TrainingLease, "guard", observe_heartbeat)
+    lease = TrainingLease(job_id, duration_seconds=4)
+    try:
+        with SessionLocal() as db:
+            assert lease.claim(db)
+            original_expiry = db.get(TrainingJob, job_id).lease_expires_at
+        assert extended.wait(timeout=5)
+    finally:
+        lease.close()
+    with SessionLocal() as db:
+        job = db.get(TrainingJob, job_id)
+        assert job.lease_expires_at > original_expiry
+        assert job.execution_attempt == 1
+    assert recover_stale_jobs() == 0
+
+
+def test_expired_worker_cannot_publish_and_retry_reuses_completed_algorithms(
+    client, auth_headers, submission, monkeypatch
+):
+    monkeypatch.setattr("app.services.training.dispatch_training_job", Mock())
+    accepted = client.post(
+        "/api/v1/training-jobs",
+        headers=auth_headers,
+        json={
+            **submission,
+            "algorithms": [
+                {"algorithm": "logistic_regression"},
+                {"algorithm": "random_forest_classifier", "hyperparameters": {"n_estimators": 10}},
+            ],
+            "register_model_name": "Recovered model",
+        },
+    )
+    assert accepted.status_code == 202, accepted.text
+    job_id = accepted.json()["id"]
+    fitting = Event()
+    release = Event()
+    fitted = []
+
+    def stop_first_forest(data, spec, hyperparameters, config):
+        fitted.append(spec.id)
+        if spec.id == "random_forest_classifier" and fitted.count(spec.id) == 1:
+            fitting.set()
+            assert release.wait(timeout=15)
+        return train_algorithm(data, spec, hyperparameters, config)
+
+    monkeypatch.setattr("app.services.training_runner.train_algorithm", stop_first_forest)
+    with ThreadPoolExecutor(1) as pool:
+        expired_worker = pool.submit(execute_training_job, job_id)
+        try:
+            assert fitting.wait(timeout=10)
+            _expire_worker(job_id)
+            assert recover_stale_jobs() == 1
+            assert recover_stale_jobs() == 0
+            assert dispatch_due_training_jobs() == 1
+        finally:
+            release.set()
+        expired_worker.result(timeout=10)
+
+    result = client.get(f"/api/v1/training-jobs/{job_id}", headers=auth_headers).json()
+    assert result["status"] == "completed", result
+    assert fitted.count("logistic_regression") == 1
+    assert fitted.count("random_forest_classifier") == 2
+    experiments = result["experiments"]
+    assert sorted(experiment["status"] for experiment in experiments) == [
+        "completed",
+        "completed",
+        "failed",
+    ]
+    failed = next(experiment for experiment in experiments if experiment["status"] == "failed")
+    assert not failed["artifact_available"]
+    with SessionLocal() as db:
+        job = db.get(TrainingJob, job_id)
+        assert job.execution_attempt == 2
+        assert job.execution_token is None and job.lease_expires_at is None
+        assert db.scalar(select(func.count(ModelVersion.id))) == 1
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_expired_execution_honors_budget_and_cancellation(
+    client, auth_headers, submission, monkeypatch, cancelled
+):
+    monkeypatch.setattr("app.services.training.dispatch_training_job", Mock())
+    monkeypatch.setattr(get_settings(), "training_max_attempts", 1 if not cancelled else 2)
+    accepted = client.post("/api/v1/training-jobs", headers=auth_headers, json=submission)
+    assert accepted.status_code == 202, accepted.text
+    job_id = accepted.json()["id"]
+    lease = TrainingLease(job_id, duration_seconds=120)
+    try:
+        with SessionLocal() as db:
+            assert lease.claim(db)
+        if cancelled:
+            assert (
+                client.post(
+                    f"/api/v1/training-jobs/{job_id}/cancel", headers=auth_headers
+                ).status_code
+                == 200
+            )
+        _expire_worker(job_id)
+        with SessionLocal.begin() as db, pytest.raises(LeaseLost):
+            lease.guard(db)
+        assert recover_stale_jobs() == 1
+    finally:
+        lease.close()
+    with SessionLocal() as db:
+        assert db.get(TrainingJob, job_id).status == ("cancelled" if cancelled else "failed")
+        assert db.get(TrainingDispatch, job_id) is None
+
+
+def test_lease_expiring_during_registration_rolls_back_model_version(
+    client, auth_headers, submission, monkeypatch
+):
+    from app.services.registry import register_experiment_as_model
+
+    def expire_during_registration(db, **kwargs):
+        version = register_experiment_as_model(db, **kwargs)
+        db.execute(
+            update(TrainingJob).values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        return version
+
+    monkeypatch.setattr(
+        "app.services.registry.register_experiment_as_model", expire_during_registration
+    )
+    accepted = client.post(
+        "/api/v1/training-jobs",
+        headers=auth_headers,
+        json={**submission, "register_model_name": "Uncommitted model"},
+    )
+    assert accepted.status_code == 202, accepted.text
+    assert accepted.json()["status"] == "running"
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count(ModelVersion.id))) == 0
+        assert db.scalar(select(func.count(RegisteredModel.id))) == 0

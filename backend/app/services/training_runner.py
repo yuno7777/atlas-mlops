@@ -13,6 +13,7 @@ from typing import Any
 
 import joblib
 from sklearn.pipeline import Pipeline
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -27,7 +28,8 @@ from app.ml.training import TrainingConfig, train_algorithm
 from app.ml.utils import float_or_none
 from app.ml.validation import read_dataframe
 from app.models.enums import ExperimentStatus, JobStatus
-from app.models.training import Experiment, TrainingJob, TrainingJobLog
+from app.models.modelops import WorkflowRun
+from app.models.training import Experiment, TrainingDispatch, TrainingJob, TrainingJobLog
 from app.repositories.training import TrainingRepository
 from app.services.storage import (
     ArtifactIntegrityError,
@@ -35,6 +37,7 @@ from app.services.storage import (
     get_storage,
     training_artifact_prefix,
 )
+from app.workers.training_lease import LeaseLost, TrainingLease
 
 logger = logging.getLogger(__name__)
 
@@ -107,16 +110,12 @@ def _mark_job_failed(db: Session, job: TrainingJob, message: str) -> None:
     job.status_message = "Failed"
     _log(db, job, message, level="error")
     db.add(job)
-    TRAINING_JOBS.labels(status="failed").inc()
-    db.commit()
 
 
 def _workflow_steps(db: Session, job: TrainingJob, updates: dict[str, tuple[str, str]]) -> None:
     workflow_id = (job.config or {}).get("workflow_run_id")
     if not workflow_id:
         return
-    from app.models.modelops import WorkflowRun
-
     run = db.get(WorkflowRun, workflow_id)
     if run is None:
         return
@@ -130,20 +129,41 @@ def _workflow_steps(db: Session, job: TrainingJob, updates: dict[str, tuple[str,
     run.status = "running"
     run.started_at = run.started_at or _now()
     db.add(run)
-    db.commit()
+
+
+def _finish_workflow(db: Session, job: TrainingJob) -> None:
+    workflow_id = (job.config or {}).get("workflow_run_id")
+    run = db.get(WorkflowRun, workflow_id) if workflow_id else None
+    if run is None:
+        return
+    run.status = str(job.status)
+    run.error_message = job.error_message
+    run.completed_at = job.completed_at
+    run.step_states = [
+        {**step, "status": run.status} if step.get("status") in {"queued", "running"} else step
+        for step in (run.step_states or [])
+    ]
+
+
+def _commit_terminal(db: Session, job: TrainingJob, lease: TrainingLease) -> None:
+    _finish_workflow(db, job)
+    job.execution_token = None
+    job.lease_expires_at = None
+    lease.commit(db)
+    TRAINING_JOBS.labels(status=job.status).inc()
 
 
 def execute_training_job(job_id: str) -> None:
     db = SessionLocal()
     job: TrainingJob | None = None
+    lease = TrainingLease(job_id, get_settings().training_lease_seconds)
     claimed = False
     active = False
     run_token = run_id_ctx.set(job_id)
     request_token = request_id_ctx.set(None)
     try:
         repository = TrainingRepository(db)
-        claimed = repository.claim_job(job_id, _now())
-        db.commit()
+        claimed = lease.claim(db)
         if not claimed:
             db.rollback()
             return
@@ -157,7 +177,7 @@ def execute_training_job(job_id: str) -> None:
         logger.info("Training job claimed")
         _log(db, job, "Worker claimed the job; loading dataset.", level="info")
         _progress(db, job, 3, "Loading dataset")
-        db.commit()
+        lease.commit(db)
 
         dataset_version = job.dataset_version
         storage = get_storage()
@@ -201,7 +221,7 @@ def execute_training_job(job_id: str) -> None:
             f"Loaded dataset version {dataset_version.version} with {len(df):,} rows and {len(df.columns)} columns.",
         )
         _progress(db, job, 8, "Preparing experiments")
-        db.commit()
+        lease.commit(db)
 
         training_config = TrainingConfig(
             problem_type=job.problem_type,
@@ -212,8 +232,15 @@ def execute_training_job(job_id: str) -> None:
             cv_folds=int(job.config.get("cv_folds", 0)),
             sensitive_columns=list(job.config.get("sensitive_columns", [])),
         )
+        completed_before_retry = {
+            item.algorithm: item
+            for item in job.experiments
+            if item.status == ExperimentStatus.COMPLETED
+        }
         experiments: list[Experiment] = []
         for selection in job.algorithms:
+            if selection["algorithm"] in completed_before_retry:
+                continue
             spec = get_algorithm(selection["algorithm"], job.problem_type)
             hyperparameters = selection.get("hyperparameters", {})
             experiment = Experiment(
@@ -236,21 +263,22 @@ def execute_training_job(job_id: str) -> None:
             )
             db.add(experiment)
             experiments.append(experiment)
-        db.flush()
-        db.commit()
+        lease.commit(db)
 
         project_slug = job.project.slug if job.project else "project"
         tracker = MLflowTracker()
         total = len(experiments)
-        successes = 0
+        successes = len(completed_before_retry)
         failures: list[str] = []
 
         for index, experiment in enumerate(experiments):
             db.refresh(job)
             if job.cancel_requested:
                 break
-            selection = job.algorithms[index]
-            spec = get_algorithm(selection["algorithm"], job.problem_type)
+            selection = next(
+                item for item in job.algorithms if item["algorithm"] == experiment.algorithm
+            )
+            spec = get_algorithm(experiment.algorithm, job.problem_type)
             experiment.status = ExperimentStatus.RUNNING
             experiment.started_at = _now()
             _progress(
@@ -261,7 +289,7 @@ def execute_training_job(job_id: str) -> None:
             )
             _log(db, job, f"Fitting {spec.label}.")
             db.add(experiment)
-            db.commit()
+            lease.commit(db)
 
             try:
                 result = train_algorithm(
@@ -270,6 +298,9 @@ def execute_training_job(job_id: str) -> None:
                     selection.get("hyperparameters", {}),
                     training_config,
                 )
+                # Fitting may outlive the worker's lease. Check ownership before writing
+                # attempt-specific files, then verify again before exposing their keys.
+                lease.commit(db)
                 for warning in result.warnings:
                     _record_tracking_failure(db, job, warning)
                 result.reference_profile["provenance"] = provenance.copy()
@@ -281,6 +312,7 @@ def execute_training_job(job_id: str) -> None:
                         result.reference_profile,
                         Path(temp_directory),
                     )
+                    lease.commit(db)
                     run_id, tracking_warning = tracker.log_run(
                         experiment_name=f"atlas-{project_slug}",
                         run_name=experiment.name,
@@ -310,20 +342,20 @@ def execute_training_job(job_id: str) -> None:
                 experiment.mlflow_run_id = run_id
                 experiment.tracking_warning = tracking_warning
                 successes += 1
-                EXPERIMENTS.labels(status="completed", algorithm=spec.id).inc()
                 _log(
                     db,
                     job,
                     f"{spec.label} completed in {result.duration_seconds:.1f}s. "
                     f"{_format_metrics(result.metrics)}",
                 )
+            except LeaseLost:
+                raise
             except TrainingError as exc:
                 message = str(exc)
                 experiment.status = ExperimentStatus.FAILED
                 experiment.error_message = message[:4000]
                 experiment.completed_at = _now()
                 failures.append(f"{spec.label}: {message}")
-                EXPERIMENTS.labels(status="failed", algorithm=spec.id).inc()
                 _log(db, job, f"{spec.label} failed: {message}", level="error")
             except Exception as exc:  # unexpected algorithm error
                 message = str(exc).splitlines()[0][:300] or exc.__class__.__name__
@@ -331,7 +363,6 @@ def execute_training_job(job_id: str) -> None:
                 experiment.error_message = f"Unexpected training error: {message}"
                 experiment.completed_at = _now()
                 failures.append(f"{spec.label}: {message}")
-                EXPERIMENTS.labels(status="failed", algorithm=spec.id).inc()
                 logger.exception("Unexpected training failure", extra={"job_id": job.id})
                 _log(db, job, f"{spec.label} failed unexpectedly: {message}", level="error")
             db.add(experiment)
@@ -341,8 +372,11 @@ def execute_training_job(job_id: str) -> None:
                 10 + int(((index + 1) / max(total, 1)) * 85),
                 f"Completed {index + 1}/{total} algorithm run(s)",
             )
-            db.commit()
+            lease.commit(db)
+            EXPERIMENTS.labels(status=experiment.status, algorithm=spec.id).inc()
 
+        # Serialize final registration and cancellation with lease recovery.
+        lease.guard(db)
         db.refresh(job)
         if job.cancel_requested:
             for experiment in experiments:
@@ -358,12 +392,11 @@ def execute_training_job(job_id: str) -> None:
             job.status_message = "Cancelled"
             job.progress = min(job.progress, 99)
             _log(db, job, "Job cancelled; remaining algorithms were skipped.", level="warning")
-            TRAINING_JOBS.labels(status="cancelled").inc()
             db.add(job)
-            db.commit()
+            _commit_terminal(db, job, lease)
             return
 
-        completed_experiments = [
+        completed_experiments = [*completed_before_retry.values()] + [
             experiment
             for experiment in experiments
             if experiment.status == ExperimentStatus.COMPLETED
@@ -374,6 +407,7 @@ def execute_training_job(job_id: str) -> None:
                 job,
                 "All algorithm runs failed. " + ("; ".join(failures) if failures else ""),
             )
+            _commit_terminal(db, job, lease)
             return
 
         _workflow_steps(
@@ -440,9 +474,8 @@ def execute_training_job(job_id: str) -> None:
         _log(
             db,
             job,
-            f"Job completed successfully with {successes}/{total} algorithm runs.",
+            f"Job completed successfully with {successes}/{len(job.algorithms)} algorithm runs.",
         )
-        TRAINING_JOBS.labels(status="completed").inc()
         db.add(job)
         _workflow_steps(
             db,
@@ -454,54 +487,35 @@ def execute_training_job(job_id: str) -> None:
                 )
             },
         )
-        db.commit()
+        _commit_terminal(db, job, lease)
+    except LeaseLost:
+        db.rollback()
+        logger.warning("Training stopped after losing its lease", extra={"job_id": job_id})
     except Exception as exc:
         logger.exception("Training runner crashed", extra={"job_id": job_id})
         db.rollback()
-        try:
-            if claimed and job is None:
-                job = TrainingRepository(db).get_job_detail(job_id)
-            if job is not None and job.status not in {
-                JobStatus.COMPLETED,
-                JobStatus.FAILED,
-                JobStatus.CANCELLED,
-            }:
-                _mark_job_failed(
-                    db,
-                    job,
-                    f"Training runner crashed: {str(exc).splitlines()[0][:300]}",
-                )
-        except Exception:
-            logger.exception("Failed to mark crashed job as failed", extra={"job_id": job_id})
-    finally:
-        if job is not None and (job.config or {}).get("workflow_run_id"):
+        if claimed:
             try:
-                from app.models.modelops import WorkflowRun
-
-                workflow_run = db.get(WorkflowRun, job.config["workflow_run_id"])
-                if workflow_run is not None:
-                    workflow_run.status = str(job.status)
-                    workflow_run.error_message = job.error_message
-                    workflow_run.completed_at = job.completed_at or _now()
-                    step_states = list(workflow_run.step_states or [])
-                    terminal = str(job.status)
-                    for step in step_states:
-                        if step.get("status") in {"queued", "running"}:
-                            step["status"] = (
-                                "completed" if terminal == JobStatus.COMPLETED else terminal
-                            )
-                    workflow_run.step_states = step_states
-                    db.add(workflow_run)
-                    db.commit()
-            except Exception:
-                logger.exception("Could not finalize workflow run", extra={"job_id": job_id})
+                job = TrainingRepository(db).get_job_detail(job_id)
+                if job is not None:
+                    lease.guard(db)
+                    _mark_job_failed(
+                        db, job, f"Training runner crashed: {str(exc).splitlines()[0][:300]}"
+                    )
+                    _commit_terminal(db, job, lease)
+            except LeaseLost:
                 db.rollback()
+            except Exception:
+                logger.exception("Failed to mark crashed job as failed", extra={"job_id": job_id})
+                db.rollback()
+    finally:
+        db.close()
+        lease.close()
         if active:
             ACTIVE_TRAINING_JOBS.dec()
             logger.info("Training worker finished")
         request_id_ctx.reset(request_token)
         run_id_ctx.reset(run_token)
-        db.close()
 
 
 def _format_metrics(metrics: dict[str, Any]) -> str:
@@ -515,37 +529,79 @@ def _format_metrics(metrics: dict[str, Any]) -> str:
 
 def recover_stale_jobs() -> int:
     settings = get_settings()
-    stale_after = timedelta(minutes=settings.stale_job_after_minutes)
+    now = _now()
+    legacy_timeout = timedelta(minutes=settings.stale_job_after_minutes)
     if settings.job_execution_mode == "celery":
         from app.workers.celery_app import VISIBILITY_TIMEOUT_SECONDS
 
-        stale_after = max(stale_after, timedelta(seconds=VISIBILITY_TIMEOUT_SECONDS))
-    cutoff = datetime.now(UTC) - stale_after
-    db = SessionLocal()
-    try:
-        stale = (
-            db.query(TrainingJob)
-            .filter(TrainingJob.status == JobStatus.RUNNING, TrainingJob.started_at < cutoff)
-            .with_for_update(skip_locked=True)
-            .all()
-        )
-        for job in stale:
-            job.status = JobStatus.FAILED
-            job.error_message = (
-                "Job was marked as failed by recovery after exceeding the stale threshold."
+        legacy_timeout = max(legacy_timeout, timedelta(seconds=VISIBILITY_TIMEOUT_SECONDS))
+    cutoff = now - legacy_timeout
+    expired = or_(
+        TrainingJob.lease_expires_at <= now,
+        and_(TrainingJob.execution_token.is_(None), TrainingJob.started_at < cutoff),
+    )
+    with SessionLocal() as db:
+        job_ids = list(
+            db.scalars(
+                select(TrainingJob.id)
+                .where(TrainingJob.status == JobStatus.RUNNING, expired)
+                .order_by(TrainingJob.lease_expires_at, TrainingJob.id)
+                .limit(100)
             )
-            job.completed_at = _now()
-            job.progress = min(job.progress, 99)
-            job.status_message = "Failed (stale)"
-            db.add(TrainingJobLog(job_id=job.id, level="error", message=job.error_message))
+        )
+
+    recovered = 0
+    for job_id in job_ids:
+        with SessionLocal.begin() as db:
+            # Claim recovery before touching experiments or the outbox. Renewal and
+            # recovery serialize on the same row in both PostgreSQL and SQLite.
+            matched = db.execute(
+                update(TrainingJob)
+                .where(TrainingJob.id == job_id, TrainingJob.status == JobStatus.RUNNING, expired)
+                .values(lease_expires_at=None)
+            )
+            if matched.rowcount != 1:
+                continue
+            job = db.get(TrainingJob, job_id)
+            assert job is not None
+            retry = (
+                job.execution_token is not None
+                and not job.cancel_requested
+                and job.execution_attempt < settings.training_max_attempts
+            )
+            job.execution_token = None
+            job.progress = 0 if retry else min(job.progress, 99)
+            if retry:
+                job.status = JobStatus.QUEUED
+                job.status_message = "Queued after worker lease expired"
+                job.started_at = None
+                job.error_message = None
+                db.add(TrainingDispatch(job_id=job.id))
+                _log(
+                    db,
+                    job,
+                    f"Worker lease expired; scheduling attempt {job.execution_attempt + 1}.",
+                    "warning",
+                )
+            else:
+                job.status = JobStatus.CANCELLED if job.cancel_requested else JobStatus.FAILED
+                job.status_message = "Cancelled" if job.cancel_requested else "Failed (worker lost)"
+                job.error_message = (
+                    None if job.cancel_requested else "Worker lost; no automatic attempts remain."
+                )
+                job.completed_at = now
+                _log(db, job, job.error_message or "Cancelled after worker loss.", "warning")
+                _finish_workflow(db, job)
             for experiment in job.experiments:
                 if experiment.status in {ExperimentStatus.RUNNING, ExperimentStatus.QUEUED}:
-                    experiment.status = ExperimentStatus.FAILED
-                    experiment.error_message = "Recovered as failed after worker loss."
-                    experiment.completed_at = _now()
-                    db.add(experiment)
-            db.add(job)
-        db.commit()
-        return len(stale)
-    finally:
-        db.close()
+                    experiment.status = (
+                        ExperimentStatus.CANCELLED
+                        if job.cancel_requested
+                        else ExperimentStatus.FAILED
+                    )
+                    experiment.error_message = "Interrupted by worker loss."
+                    experiment.completed_at = now
+            if not retry:
+                TRAINING_JOBS.labels(status=job.status).inc()
+            recovered += 1
+    return recovered

@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
 
     job_execution_mode: Literal["celery", "thread", "sync"] = "thread"
+    training_lease_seconds: int = Field(120, ge=15, le=900)
+    training_max_attempts: int = Field(2, ge=1, le=5)
     thread_workers: int = Field(2, ge=1, le=32)
     redis_url: str = "redis://localhost:6379/0"
     stale_job_after_minutes: int = Field(180, ge=1)

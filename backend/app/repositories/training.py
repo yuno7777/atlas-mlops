@@ -70,16 +70,45 @@ class TrainingRepository:
             self.db.execute(query.order_by(TrainingJobLog.id.asc()).limit(limit)).scalars().all()
         )
 
-    def claim_job(self, job_id: str, now: datetime) -> bool:
+    def claim_job(self, job_id: str, now: datetime, token: str, expires: datetime) -> bool:
         result = self.db.execute(
             update(TrainingJob)
             .where(TrainingJob.id == job_id, TrainingJob.status == JobStatus.QUEUED)
-            .values(status=JobStatus.RUNNING, started_at=now, progress=1, status_message="Starting")
+            .values(
+                status=JobStatus.RUNNING,
+                started_at=now,
+                progress=1,
+                status_message="Starting",
+                execution_token=token,
+                lease_expires_at=expires,
+                execution_attempt=TrainingJob.execution_attempt + 1,
+            )
         )
         if result.rowcount != 1:
             return False
         self.clear_dispatch(job_id)
         return True
+
+    def update_lease(self, job_id: str, token: str, expires: datetime) -> bool:
+        # Evaluate expiry in the database when the row is locked. A worker may
+        # have waited behind another transaction since it requested the write.
+        now = (
+            func.strftime("%Y-%m-%d %H:%M:%f", "now") + "000"
+            if self.db.get_bind().dialect.name == "sqlite"
+            else func.clock_timestamp()
+        )
+        result = self.db.execute(
+            update(TrainingJob)
+            .where(
+                TrainingJob.id == job_id,
+                TrainingJob.status == JobStatus.RUNNING,
+                TrainingJob.execution_token == token,
+                TrainingJob.lease_expires_at > now,
+            )
+            .values(lease_expires_at=expires)
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount == 1
 
     def clear_dispatch(self, job_id: str) -> None:
         self.db.execute(delete(TrainingDispatch).where(TrainingDispatch.job_id == job_id))
