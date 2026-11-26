@@ -94,7 +94,7 @@ sequenceDiagram
   participant S as Artifact store
 
   U->>A: POST /training-jobs
-  A->>D: insert job (queued) + audit
+  A->>D: insert queued job + dispatch record + audit
   A->>Q: enqueue run_training_job(job_id)
   A-->>U: 202 + job
   W->>Q: consume

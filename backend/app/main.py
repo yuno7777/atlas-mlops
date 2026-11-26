@@ -32,6 +32,7 @@ from app.ml.executor import InferenceExecutor
 from app.schemas.common import HealthResponse, ReadinessCheck, ReadinessResponse
 from app.services.storage import get_storage
 from app.services.training_runner import recover_stale_jobs
+from app.workers.dispatch import dispatch_due_training_jobs
 from app.workers.executor import reset_job_executor
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,16 @@ async def _monitoring_loop(interval: int) -> None:
         await asyncio.sleep(max(60, interval))
 
 
+async def _training_dispatch_loop(stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(dispatch_due_training_jobs)
+        except Exception:
+            logger.exception("Local training dispatch reconciliation failed")
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=15)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -101,9 +112,17 @@ async def lifespan(app: FastAPI):
             logger.warning("Recovered stale training jobs", extra={"count": recovered})
     except Exception:
         logger.exception("Startup training-job recovery failed")
-    scheduler_task: asyncio.Task | None = None
-    if settings.enable_monitoring_scheduler and settings.job_execution_mode != "celery":
-        scheduler_task = asyncio.create_task(_monitoring_loop(settings.monitoring_interval_seconds))
+    dispatch_stop = asyncio.Event()
+    dispatch_task = (
+        asyncio.create_task(_training_dispatch_loop(dispatch_stop))
+        if settings.job_execution_mode == "thread"
+        else None
+    )
+    scheduler_task = (
+        asyncio.create_task(_monitoring_loop(settings.monitoring_interval_seconds))
+        if settings.enable_monitoring_scheduler and settings.job_execution_mode != "celery"
+        else None
+    )
     logger.info(
         "Atlas API started",
         extra={
@@ -135,6 +154,9 @@ async def lifespan(app: FastAPI):
             scheduler_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await scheduler_task
+        if dispatch_task is not None:
+            dispatch_stop.set()
+            await dispatch_task
         shutdown_tracing()
         reset_job_executor()
         logger.info("Atlas API stopped")

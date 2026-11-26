@@ -49,6 +49,21 @@ operator, for example `hooks.slack.com`. The API and worker deliver to HTTPS on 
 443 and reject redirects. Existing channels remain visible and delivery reports a
 configuration error if their host is missing from the allowlist.
 
+## Training dispatch recovery
+
+Migration `0005_training_dispatch` backfills dispatch records for jobs already queued.
+The API saves each new job and its dispatch record in one transaction. A dispatcher
+reserves the record for two minutes before publishing. It makes a failed publish
+eligible again after 30 seconds. It gives a successful publish 15 minutes for a
+worker to claim it before trying another delivery. Actual retry time also depends on
+the reconciliation interval and worker availability. Celery beat requests a
+reconciliation every two minutes. A dispatcher can send more than one message over
+a job's lifetime, and the atomic worker claim allows one to start training.
+Queued cancellation clears the dispatch record in the same transaction.
+
+This recovery covers jobs waiting for a worker. Loss after a worker has started
+training still follows the stale-job timeout.
+
 ## Storage and model trust
 
 For S3, pass `STORAGE_BACKEND=s3`, `S3_BUCKET`, optional `S3_REGION` and `S3_ENDPOINT_URL`, and credentials or workload identity to both the API and worker through a deployment override. Use a private bucket with workload-scoped access and object versioning. To move MLflow artifacts separately, set its `--artifacts-destination` and grant the tracking process access.
@@ -60,7 +75,7 @@ Atlas loads joblib models created by its own workers. Limit write access to the 
 | Symptom | Check |
 | --- | --- |
 | `/ready` returns 503 | Inspect the named lifecycle, database, storage, or Redis check. Use `docker compose logs backend postgres redis` for context. |
-| Training remains queued | Inspect `docker compose logs worker beat`. Beat reconciles older queued jobs and workers claim each job atomically. If a running worker is lost, stale-job recovery marks that run failed after the configured threshold. |
+| Training remains queued | Inspect `docker compose logs worker beat`. Beat retries due database dispatch records. Native thread mode checks those records every 15 seconds. Workers clear the record when claiming the job. If a running worker is lost, stale-job recovery marks that run failed after the configured threshold. |
 | Tracking warning in a completed run | Check `docker compose logs mlflow mlflow-db-init`, tracking URI, and MLflow artifact permissions. The Atlas experiment and registry remain available independently. |
 | Prediction returns 503 or 504 | Check deployment status, verified model bytes, and inference worker saturation. A timed-out scoring thread holds its slot until it exits. Use the response's `X-Request-ID` to find its log. |
 | Drift metrics are empty | Check `ENABLE_MONITORING_SCHEDULER`, beat logs, the deployment sample threshold, and availability of labels. Scrape `backend:8000/metrics` and `worker:9101/metrics` from the internal network. |

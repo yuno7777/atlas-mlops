@@ -14,7 +14,7 @@ from app.models.deployment import (
 from app.models.modelops import DeploymentRollout, WorkflowRun
 from app.models.monitoring import MonitoringResult
 from app.models.registry import ModelVersion, RegisteredModel
-from app.models.training import Experiment, TrainingJob, TrainingJobLog
+from app.models.training import Experiment, TrainingDispatch, TrainingJob, TrainingJobLog
 from app.models.user import Project, User, Workspace, WorkspaceMember
 
 __all__ = [
@@ -34,6 +34,7 @@ __all__ = [
     "PredictionLog",
     "Project",
     "RegisteredModel",
+    "TrainingDispatch",
     "TrainingJob",
     "TrainingJobLog",
     "User",
