@@ -1,80 +1,135 @@
+x-atlas-build: &atlas-build
+  context: ./backend
+  args:
+    CODE_REVISION: ${CODE_REVISION:-unknown}
+
+x-atlas-environment: &atlas-environment
+  ENVIRONMENT: production
+  SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-atlas}
+  REDIS_URL: redis://redis:6379/0
+  JOB_EXECUTION_MODE: celery
+  MLFLOW_ENABLED: "true"
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  MLFLOW_HTTP_REQUEST_TIMEOUT: "15"
+  MLFLOW_HTTP_REQUEST_MAX_RETRIES: "1"
+  MLFLOW_ARTIFACT_ROOT: /data/artifacts/mlflow
+  ARTIFACT_ROOT: /data/artifacts
+  STORAGE_BACKEND: local
+  CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_JSON: "true"
+  ALERT_WEBHOOK_ALLOWED_HOSTS: ${ALERT_WEBHOOK_ALLOWED_HOSTS:-}
+  ENABLE_MONITORING_SCHEDULER: ${ENABLE_MONITORING_SCHEDULER:-true}
+  INFERENCE_THREADS: ${INFERENCE_THREADS:-4}
+  INFERENCE_TIMEOUT_SECONDS: ${INFERENCE_TIMEOUT_SECONDS:-10}
+  MAX_PREDICTION_BODY_BYTES: ${MAX_PREDICTION_BODY_BYTES:-2097152}
+
+x-atlas-runtime: &atlas-runtime
+  build: *atlas-build
+  image: ${ATLAS_BACKEND_IMAGE:-atlas-backend:local}
+  restart: unless-stopped
+  init: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 256
+
 services:
   postgres:
-    image: postgres:16-alpine
-    container_name: atlas-postgres
+    image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-atlas}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-atlas_secret_pass}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-atlas}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    cpus: 1.0
+    mem_limit: 512m
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
-      timeout: 5s
-      retries: 5
+      timeout: 4s
+      retries: 12
 
   redis:
-    image: redis:7-alpine
-    container_name: atlas-redis
+    image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
     restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
+    cpus: 0.5
+    mem_limit: 384m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
-      timeout: 5s
-      retries: 5
+      timeout: 4s
+      retries: 12
 
-  mlflow:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: atlas-mlflow
-    restart: unless-stopped
-    command: >
-      mlflow server
-      --backend-store-uri postgresql+psycopg://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas_secret_pass}@postgres:5432/${POSTGRES_DB:-atlas}
-      --default-artifact-root /data/artifacts/mlflow
-      --host 0.0.0.0
-      --port 5000
-    ports:
-      - "5000:5000"
+  mlflow-db-init:
+    image: postgres:16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
+    user: postgres
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-atlas}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGDATABASE: ${POSTGRES_DB:-atlas}
+      MLFLOW_POSTGRES_DB: ${MLFLOW_POSTGRES_DB:-atlas_mlflow}
+    command: ["sh", "/opt/atlas/init-mlflow-db.sh"]
     volumes:
-      - artifacts_data:/data/artifacts
+      - ./deploy/init-mlflow-db.sh:/opt/atlas/init-mlflow-db.sh:ro
     depends_on:
       postgres:
         condition: service_healthy
+    cpus: 0.25
+    mem_limit: 96m
+
+  mlflow:
+    <<: *atlas-runtime
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri
+      - postgresql+psycopg://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${MLFLOW_POSTGRES_DB:-atlas_mlflow}
+      - --artifacts-destination
+      - /data/artifacts/mlflow
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --workers
+      - "1"
+      - --allowed-hosts
+      - "mlflow:5000,localhost:*,127.0.0.1:*"
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - artifacts_data:/data/artifacts
+    depends_on:
+      mlflow-db-init:
+        condition: service_completed_successfully
+    cpus: 1.0
+    mem_limit: 1536m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).close()"]
+      interval: 10s
+      timeout: 4s
+      retries: 12
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: atlas-backend
-    restart: unless-stopped
-    command: >
-      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    <<: *atlas-runtime
+    command: ["sh", "-ec", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 5 --timeout-graceful-shutdown 25"]
+    stop_grace_period: 35s
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
-      ENVIRONMENT: production
-      SECRET_KEY: ${SECRET_KEY:-dev-only-insecure-secret-change-me-at-least-32-chars}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas_secret_pass}@postgres:5432/${POSTGRES_DB:-atlas}
-      REDIS_URL: redis://redis:6379/0
-      JOB_EXECUTION_MODE: celery
-      MLFLOW_ENABLED: "true"
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      MLFLOW_ARTIFACT_ROOT: /data/artifacts/mlflow
-      ARTIFACT_ROOT: /data/artifacts
-      STORAGE_BACKEND: local
-      CORS_ORIGINS: http://localhost:3000,http://localhost:5173
-      LOG_LEVEL: INFO
-      LOG_JSON: "true"
+      <<: *atlas-environment
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      DOCS_ENABLED: ${DOCS_ENABLED:-true}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-atlas-api}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     volumes:
@@ -84,69 +139,65 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      mlflow:
-        condition: service_started
+    cpus: 1.0
+    mem_limit: 768m
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=5).close()"]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout: 7s
+      retries: 12
 
   worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: atlas-worker
-    restart: unless-stopped
-    command: celery -A app.workers.celery_app worker --loglevel=info -c 2
+    <<: *atlas-runtime
+    command: ["sh", "-ec", "export PROMETHEUS_MULTIPROC_DIR=$$(mktemp -d) && exec celery -A app.workers.celery_app worker --loglevel=info --concurrency=1 --hostname=atlas@worker"]
+    expose: ["9101"]
+    stop_grace_period: 90s
     environment:
-      ENVIRONMENT: production
-      SECRET_KEY: ${SECRET_KEY:-dev-only-insecure-secret-change-me-at-least-32-chars}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas_secret_pass}@postgres:5432/${POSTGRES_DB:-atlas}
-      REDIS_URL: redis://redis:6379/0
-      JOB_EXECUTION_MODE: celery
-      MLFLOW_ENABLED: "true"
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-      MLFLOW_ARTIFACT_ROOT: /data/artifacts/mlflow
-      ARTIFACT_ROOT: /data/artifacts
-      STORAGE_BACKEND: local
-      LOG_LEVEL: INFO
+      <<: *atlas-environment
+      WORKER_METRICS_PORT: "9101"
     volumes:
       - artifacts_data:/data/artifacts
     depends_on:
       backend:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+    cpus: 2.0
+    mem_limit: 1536m
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.workers.celery_app", "inspect", "--timeout=3", "--destination=atlas@worker", "ping"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
 
   beat:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: atlas-beat
-    restart: unless-stopped
-    command: celery -A app.workers.celery_app beat --loglevel=info
-    environment:
-      ENVIRONMENT: production
-      SECRET_KEY: ${SECRET_KEY:-dev-only-insecure-secret-change-me-at-least-32-chars}
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-atlas}:${POSTGRES_PASSWORD:-atlas_secret_pass}@postgres:5432/${POSTGRES_DB:-atlas}
-      REDIS_URL: redis://redis:6379/0
-      LOG_LEVEL: INFO
+    <<: *atlas-runtime
+    command: ["celery", "-A", "app.workers.celery_app", "beat", "--loglevel=info", "--schedule=/tmp/celerybeat-schedule"]
+    environment: *atlas-environment
     depends_on:
-      redis:
+      backend:
         condition: service_healthy
+    cpus: 0.5
+    mem_limit: 256m
 
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
-    container_name: atlas-frontend
+    image: ${ATLAS_FRONTEND_IMAGE:-atlas-frontend:local}
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
     ports:
-      - "3000:80"
+      - "127.0.0.1:3000:8080"
     depends_on:
       backend:
         condition: service_healthy
+    cpus: 0.5
+    mem_limit: 128m
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 4s
+      retries: 5
 
 volumes:
   postgres_data:

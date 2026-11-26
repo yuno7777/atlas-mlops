@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Header, Query, status
 
 from app.api.deps import ClientIP, CurrentUser, Database, page_payload
 from app.ml.algorithms import list_algorithms
@@ -36,8 +36,13 @@ def create_training_job(
     db: Database,
     user: CurrentUser,
     ip_address: ClientIP,
+    idempotency_key: Annotated[
+        str | None, Header(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    ] = None,
 ) -> TrainingJobDetail:
-    return training_service.create_training_job(db, user, payload, ip_address)
+    return training_service.create_training_job(
+        db, user, payload, ip_address, idempotency_key=idempotency_key
+    )
 
 
 @router.get("/training-jobs", response_model=Page[TrainingJobSummary])

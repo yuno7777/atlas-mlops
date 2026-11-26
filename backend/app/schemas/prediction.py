@@ -2,16 +2,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, StrictBool, StrictInt, StrictStr
+
+TabularValue = StrictStr | StrictBool | StrictInt | FiniteFloat | None
 
 
 class PredictionRequest(BaseModel):
-    records: list[dict[str, Any]] = Field(min_length=1, max_length=1000)
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    records: list[dict[str, TabularValue]] = Field(min_length=1, max_length=1000)
 
 
 class PredictionItem(BaseModel):
-    prediction: Any
-    probabilities: dict[str, float] | None = None
+    prediction: TabularValue
+    probabilities: dict[str, FiniteFloat] | None = None
 
 
 class PredictionResponse(BaseModel):
@@ -21,7 +25,7 @@ class PredictionResponse(BaseModel):
     model_version: int
     variant: str = "champion"
     predictions: list[PredictionItem]
-    latency_ms: float
+    latency_ms: FiniteFloat
     warnings: list[str] = Field(default_factory=list)
 
 

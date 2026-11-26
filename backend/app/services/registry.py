@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.db.base import new_id
 from app.ml.evaluation import METRIC_DIRECTIONS, metric_directions
 from app.ml.utils import float_or_none
 from app.models.enums import ExperimentStatus, ModelStage, ProblemType
@@ -172,7 +173,8 @@ def register_experiment_as_model(
         )
 
     next_version = repository.next_version_number(model.id)
-    prefix = registry_artifact_prefix(model.id, next_version)
+    version_id = new_id()
+    prefix = f"{registry_artifact_prefix(model.id, next_version)}/{version_id}"
     model_key = f"{prefix}/model.joblib"
     reference_key = f"{prefix}/reference_profile.json"
     copied: list[str] = []
@@ -182,6 +184,9 @@ def register_experiment_as_model(
         copied.append(model_key)
         artifact_sha256 = storage.sha256(model_key)
         reference_profile = experiment.reference_profile or {}
+        expected_digest = reference_profile.get("provenance", {}).get("model_sha256")
+        if expected_digest and artifact_sha256 != expected_digest:
+            raise ValidationError("The training artifact failed its integrity check.")
         storage.put_bytes(
             reference_key,
             json.dumps(reference_profile, indent=2).encode("utf-8"),
@@ -189,6 +194,7 @@ def register_experiment_as_model(
         copied.append(reference_key)
 
         version = ModelVersion(
+            id=version_id,
             registered_model_id=model.id,
             version=next_version,
             experiment_id=experiment.id,
@@ -228,7 +234,8 @@ def register_experiment_as_model(
         if commit:
             db.commit()
     except IntegrityError as exc:
-        db.rollback()
+        if commit:
+            db.rollback()
         for key in copied:
             with contextlib.suppress(Exception):
                 storage.delete(key)
@@ -236,7 +243,8 @@ def register_experiment_as_model(
             "Another registration modified this model concurrently. Retry the request."
         ) from exc
     except Exception:
-        db.rollback()
+        if commit:
+            db.rollback()
         for key in copied:
             with contextlib.suppress(Exception):
                 storage.delete(key)

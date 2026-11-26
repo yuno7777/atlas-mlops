@@ -71,7 +71,7 @@ def validate_records(
                     continue
                 try:
                     numeric_value = float(value)
-                except (TypeError, ValueError):
+                except (OverflowError, TypeError, ValueError):
                     errors.append(
                         {
                             "field": f"records[{index}].{name}",
@@ -115,8 +115,7 @@ def run_predictions(
     try:
         predictions = pipeline.predict(frame)
     except Exception as exc:
-        message = str(exc).splitlines()[0][:300] or exc.__class__.__name__
-        raise ValidationError(f"The model could not score this input: {message}") from exc
+        raise ValidationError("The model could not score this input.") from exc
 
     probabilities: np.ndarray | None = None
     if problem_type == "classification":
@@ -135,7 +134,8 @@ def run_predictions(
                 classes = range(probabilities.shape[1])
             item["probabilities"] = {
                 str(json_safe(label)): float(value)
-                for label, value in zip(classes, probabilities[index], strict=False)
+                for label, value in zip(classes, probabilities[index], strict=True)
+                if math.isfinite(value)
             }
         else:
             item["probabilities"] = None

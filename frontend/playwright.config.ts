@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -8,10 +9,14 @@ process.env.ATLAS_E2E_STATE_DIR = stateDir
 const databasePath = join(stateDir, 'atlas.db').replaceAll('\\', '/')
 const mlflowPath = join(stateDir, 'mlflow.db').replaceAll('\\', '/')
 const backendDir = resolve(process.cwd(), '../backend')
-const localPython = resolve(process.cwd(), '../.venv/Scripts/python.exe')
-const backendCommand = existsSync(localPython)
-  ? `"${localPython}" e2e_server.py`
-  : 'python e2e_server.py'
+const pythonPaths = [
+  resolve(backendDir, '.venv/bin/python'),
+  resolve(backendDir, '.venv/Scripts/python.exe'),
+  resolve(backendDir, '../.venv/Scripts/python.exe'),
+]
+const localPython = pythonPaths.find(existsSync)
+const backendCommand = localPython ? `"${localPython}" e2e_server.py` : 'python e2e_server.py'
+const chromiumPath = process.env.ATLAS_E2E_CHROMIUM
 
 export default defineConfig({
   testDir: './e2e',
@@ -25,6 +30,7 @@ export default defineConfig({
     baseURL: 'http://127.0.0.1:5174',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
+    launchOptions: chromiumPath ? { executablePath: chromiumPath } : {},
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: [
@@ -38,7 +44,7 @@ export default defineConfig({
         DATABASE_URL: `sqlite:///${databasePath}`,
         MLFLOW_TRACKING_URI: `sqlite:///${mlflowPath}`,
         ARTIFACT_ROOT: join(stateDir, 'artifacts'),
-        SECRET_KEY: 'atlas-e2e-test-secret-key-with-sufficient-length',
+        SECRET_KEY: randomBytes(32).toString('hex'),
         ENVIRONMENT: 'test',
         JOB_EXECUTION_MODE: 'sync',
         MLFLOW_ENABLED: 'false',
@@ -47,7 +53,7 @@ export default defineConfig({
       },
     },
     {
-      command: 'npm run dev -- --host 127.0.0.1 --port 5174 --strictPort',
+      command: 'npm run build && npm run preview -- --host 127.0.0.1 --port 5174 --strictPort',
       cwd: process.cwd(),
       url: 'http://127.0.0.1:5174',
       timeout: 60_000,

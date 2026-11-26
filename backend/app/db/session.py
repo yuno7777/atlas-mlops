@@ -17,6 +17,9 @@ if _settings.is_sqlite:
     _connect_args = {"check_same_thread": False}
     _engine_kwargs["pool_pre_ping"] = False
 else:
+    if _settings.database_url.startswith(("postgresql:", "postgresql+")):
+        _connect_args = {"connect_timeout": 5}
+    _engine_kwargs["pool_timeout"] = 5
     _engine_kwargs["pool_size"] = _settings.database_pool_size
     _engine_kwargs["max_overflow"] = _settings.database_max_overflow
 

@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Generator, Iterator
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from app.core.config import get_settings
 from app.core.exceptions import NotFoundError, ServiceUnavailableError
@@ -42,6 +42,23 @@ class StorageBackend(Protocol):
     def health(self) -> tuple[bool, str]: ...
 
 
+class ArtifactIntegrityError(ValueError):
+    """The storage bytes do not match the digest recorded by Atlas."""
+
+
+def copy_verified(
+    storage: StorageBackend, key: str, expected_sha256: str, target: BinaryIO
+) -> None:
+    """Copy one object generation into a private snapshot before consuming it."""
+    digest = hashlib.sha256()
+    for chunk in storage.iter_chunks(key):
+        digest.update(chunk)
+        target.write(chunk)
+    if digest.hexdigest() != expected_sha256:
+        raise ArtifactIntegrityError("Stored artifact did not match its SHA-256 digest.")
+    target.seek(0)
+
+
 class LocalStorage:
     backend_name = "local"
 
@@ -59,16 +76,21 @@ class LocalStorage:
     def put_file(self, key: str, source: Path) -> None:
         destination = self._resolve(key)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = destination.with_suffix(destination.suffix + ".tmp")
-        shutil.copyfile(source, temp_path)
-        temp_path.replace(destination)
+        with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
+            temp_path = Path(handle.name)
+            try:
+                with source.open("rb") as source_handle:
+                    shutil.copyfileobj(source_handle, handle)
+                handle.close()
+                temp_path.replace(destination)
+            finally:
+                temp_path.unlink(missing_ok=True)
 
     def put_bytes(self, key: str, data: bytes) -> None:
-        destination = self._resolve(key)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = destination.with_suffix(destination.suffix + ".tmp")
-        temp_path.write_bytes(data)
-        temp_path.replace(destination)
+        with tempfile.NamedTemporaryFile() as handle:
+            handle.write(data)
+            handle.flush()
+            self.put_file(key, Path(handle.name))
 
     def read_bytes(self, key: str) -> bytes:
         path = self._resolve(key)
@@ -118,9 +140,8 @@ class LocalStorage:
 
     def health(self) -> tuple[bool, str]:
         try:
-            probe = self.root / ".health"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink(missing_ok=True)
+            with tempfile.TemporaryFile(dir=self.root) as probe:
+                probe.write(b"ok")
             return True, str(self.root)
         except OSError as exc:
             return False, f"Artifact root is not writable: {exc}"
@@ -131,6 +152,7 @@ class S3Storage:
 
     def __init__(self) -> None:
         import boto3
+        from botocore.config import Config
 
         settings = get_settings()
         self.bucket = settings.s3_bucket
@@ -141,6 +163,7 @@ class S3Storage:
             aws_access_key_id=settings.s3_access_key_id or None,
             aws_secret_access_key=settings.s3_secret_access_key or None,
             use_ssl=settings.s3_use_ssl,
+            config=Config(connect_timeout=3, read_timeout=5, retries={"total_max_attempts": 2}),
         )
 
     def put_file(self, key: str, source: Path) -> None:
@@ -193,7 +216,8 @@ class S3Storage:
             response = self.client.get_object(Bucket=self.bucket, Key=_validate_key(key))
         except self.client.exceptions.NoSuchKey as exc:
             raise NotFoundError(f"Artifact not found: {key}") from exc
-        yield from response["Body"].iter_chunks(chunk_size=CHUNK_SIZE)
+        with contextlib.closing(response["Body"]) as body:
+            yield from body.iter_chunks(chunk_size=CHUNK_SIZE)
 
     @contextlib.contextmanager
     def open_path(self, key: str) -> Generator[Path, None, None]:

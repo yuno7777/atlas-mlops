@@ -226,7 +226,12 @@ def _ensure_deployment(db, user, project):
 
 
 def seed_demo(args: argparse.Namespace) -> int:
+    from app.core.config import get_settings
+
     os.environ.setdefault("JOB_EXECUTION_MODE", "sync")
+    if get_settings().environment == "production":
+        print("Demo seeding is available only in development and test.", file=sys.stderr)
+        return 2
     SessionLocal, settings = _bootstrap()
     data_file = Path(args.data_file).expanduser().resolve()
     if not data_file.exists():
@@ -245,7 +250,6 @@ def seed_demo(args: argparse.Namespace) -> int:
 
     print("Atlas demo data is ready.")
     print(f"  Login:    {args.email}")
-    print(f"  Password: {args.password}")
     print(f"  Project:  {project.name} ({project.id})")
     print(f"  Dataset:  {dataset.name}, version {version.version}")
     print(f"  Job:      {job.name} [{job.status}] ({job.id})")

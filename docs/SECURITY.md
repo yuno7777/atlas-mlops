@@ -74,6 +74,12 @@ fine-grained per-resource ACLs, SSO/SAML/MFA, malware scanning, supply-chain att
 - All user text is rendered through React (escaped); no `dangerouslySetInnerHTML`.
 - OpenAPI docs are enabled by default for demos; disable in locked environments.
 
+## Alert deliveries
+
+Production alert targets must use an administrator-approved HTTPS hostname on port 443.
+Delivery never follows redirects. Configure `ALERT_WEBHOOK_ALLOWED_HOSTS` on both the API
+and worker, and restrict their network egress as appropriate for the deployment.
+
 ## Database
 
 - Parameterized queries via SQLAlchemy ORM; no string-built SQL.
@@ -92,7 +98,7 @@ never written to audit metadata.
 ## Secrets Management
 
 - `.env` ignored; `.env.example` contains placeholders only.
-- No credentials in code, tests, docs, or CI logs.
+- Container database and signing credentials are provided at runtime. CI generates and masks ephemeral credentials.
 - MLflow server in compose has no auth; it is bound to localhost/network-internal only.
   Production must front it with an authenticating proxy or private networking.
 - Rotate `SECRET_KEY`, database passwords, S3 credentials, and deployment keys on
@@ -112,7 +118,7 @@ never written to audit metadata.
 1. In-memory rate limiting is per process; use Redis for multi-replica deployments.
 2. No refresh-token rotation or server-side token revocation.
 3. No MFA/SSO.
-4. No automated dependency vulnerability scanning (recommended: Dependabot, Trivy).
+4. CI audits locked Python and npm dependencies. Scanning operating-system packages in the container images is a separate control.
 5. MLflow server has no built-in authentication; keep it private.
 6. Joblib/pickle artifacts remain a trusted-artifact boundary.
 7. No per-field data classification/redaction beyond UI masking.

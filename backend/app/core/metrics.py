@@ -39,7 +39,13 @@ DRIFT_DETECTIONS = Counter(
     "Monitoring results by status.",
     ["deployment_id", "status"],
 )
+DRIFT_SIGNALS = Counter(
+    "atlas_drift_signals_total",
+    "Monitoring scans with detected drift by signal.",
+    ["deployment_id", "signal"],
+)
 ACTIVE_TRAINING_JOBS = Gauge(
     "atlas_active_training_jobs",
-    "Training jobs currently running in this process.",
+    "Training jobs currently running.",
+    multiprocess_mode="livesum",
 )

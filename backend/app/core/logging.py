@@ -11,6 +11,8 @@ request_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "request_id", default=None
 )
 
+run_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("run_id", default=None)
+
 _RESERVED_ATTRS = {
     "args",
     "asctime",
@@ -49,6 +51,9 @@ class JsonFormatter(logging.Formatter):
         request_id = request_id_ctx.get()
         if request_id:
             payload["request_id"] = request_id
+        run_id = run_id_ctx.get()
+        if run_id:
+            payload["run_id"] = run_id
         for key, value in record.__dict__.items():
             if key not in _RESERVED_ATTRS and not key.startswith("_"):
                 try:
@@ -84,6 +89,9 @@ def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
     root.addHandler(handler)
     for noisy in ("uvicorn.access", "sqlalchemy.engine", "botocore", "boto3", "s3transfer"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    uvicorn_logger = logging.getLogger("uvicorn")
+    uvicorn_logger.handlers.clear()
+    uvicorn_logger.propagate = True
     logging.getLogger("uvicorn.error").setLevel(level.upper())
 
 

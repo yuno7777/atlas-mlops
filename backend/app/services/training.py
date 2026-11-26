@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from datetime import UTC, datetime
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    ConflictError,
+    NotFoundError,
+    ServiceUnavailableError,
+    ValidationError,
+)
+from app.core.logging import request_id_ctx
 from app.ml.algorithms import get_algorithm, validate_hyperparameters
 from app.ml.evaluation import metric_directions
 from app.ml.utils import float_or_none
@@ -113,6 +123,25 @@ def experiment_summary(
     )
 
 
+def _find_replay(
+    db: Session, user: User, project_id: str, key: str, fingerprint: str
+) -> TrainingJobDetail | None:
+    job = db.scalar(
+        select(TrainingJob).where(
+            TrainingJob.project_id == project_id,
+            TrainingJob.created_by == user.id,
+            TrainingJob.idempotency_key == key,
+        )
+    )
+    if job is None:
+        return None
+    if job.config.get("submission_sha256") != fingerprint:
+        raise ConflictError(
+            "This Idempotency-Key was already used for a different training request."
+        )
+    return get_training_job(db, user, job.id)
+
+
 def create_training_job(
     db: Session,
     user: User,
@@ -120,8 +149,18 @@ def create_training_job(
     ip_address: str | None = None,
     *,
     retrain_source_deployment_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> TrainingJobDetail:
     project, _role = require_project(db, user, payload.project_id, write=True)
+    fingerprint = ""
+    if idempotency_key is not None:
+        canonical = json.dumps(
+            payload.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        )
+        fingerprint = hashlib.sha256(canonical.encode()).hexdigest()
+        replay = _find_replay(db, user, project.id, idempotency_key, fingerprint)
+        if replay is not None:
+            return replay
     dataset_repository = DatasetRepository(db)
     dataset_version = dataset_repository.get_version(payload.dataset_version_id)
     if dataset_version is None or dataset_version.dataset.project_id != project.id:
@@ -194,7 +233,10 @@ def create_training_job(
         "cv_folds": payload.cv_folds,
         "register_model_name": payload.register_model_name,
         "sensitive_columns": sensitive_columns,
+        "request_id": request_id_ctx.get(),
     }
+    if idempotency_key is not None:
+        config["submission_sha256"] = fingerprint
     if payload.workflow_run_id:
         from app.models.modelops import WorkflowRun
 
@@ -216,6 +258,7 @@ def create_training_job(
         feature_columns=payload.feature_columns,
         algorithms=normalized_algorithms,
         config=config,
+        idempotency_key=idempotency_key,
         status=JobStatus.QUEUED,
         progress=0,
         status_message="Queued",
@@ -223,7 +266,15 @@ def create_training_job(
         retrain_source_deployment_id=retrain_source_deployment_id,
     )
     db.add(job)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        if idempotency_key is not None:
+            replay = _find_replay(db, user, payload.project_id, idempotency_key, fingerprint)
+            if replay is not None:
+                return replay
+        raise
     if payload.workflow_run_id:
         workflow_run.training_job_id = job.id
         workflow_run.status = "queued"
@@ -256,18 +307,17 @@ def create_training_job(
 
     try:
         get_job_executor().enqueue(job.id)
-    except Exception as exc:
-        job.status = JobStatus.FAILED
-        job.error_message = f"Could not enqueue the training job: {exc}"
-        job.completed_at = datetime.now(UTC)
-        db.add(job)
-        db.add(TrainingJobLog(job_id=job.id, level="error", message=job.error_message))
+    except ServiceUnavailableError:
+        # A broker publish can succeed before the client receives an error. Keep the
+        # durable queued job so reconciliation can deliver it safely.
+        db.add(
+            TrainingJobLog(
+                job_id=job.id,
+                level="warning",
+                message="Queue unavailable; awaiting dispatch recovery.",
+            )
+        )
         db.commit()
-        from app.core.exceptions import ServiceUnavailableError
-
-        raise ServiceUnavailableError(
-            "The training queue is unavailable. Verify Redis/Celery configuration."
-        ) from exc
 
     db.expire_all()
     return get_training_job(db, user, job.id)

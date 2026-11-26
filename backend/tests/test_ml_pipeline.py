@@ -178,3 +178,9 @@ def test_drift_calculation():
 
     assert psi_same < 0.05, f"Expected small PSI for near-identical buckets, got {psi_same}"
     assert psi_shifted > 0.25, f"Expected large PSI for shifted buckets, got {psi_shifted}"
+
+
+def test_csv_sniff_handles_a_split_utf8_character(tmp_path: Path) -> None:
+    path = tmp_path / "unicode.csv"
+    path.write_text(f"label,value\n{'a' * 4083}é,1\n", encoding="utf-8")
+    assert read_dataframe(path, path.name).iloc[0]["label"].endswith("é")

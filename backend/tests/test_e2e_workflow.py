@@ -3,9 +3,14 @@ from __future__ import annotations
 import io
 
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from app.models.dataset import DatasetVersion
+from app.services.storage import get_storage
+from app.services.training_runner import execute_training_job
 
 
-def test_complete_mlops_lifecycle_e2e(client: TestClient, training_csv: bytes):
+def test_complete_mlops_lifecycle_e2e(client: TestClient, training_csv: bytes, db_session: Session):
     """Execute the full end-to-end definition-of-done workflow through HTTP endpoints."""
     # 1. Register user
     res = client.post(
@@ -72,9 +77,19 @@ def test_complete_mlops_lifecycle_e2e(client: TestClient, training_csv: bytes):
         "cv_folds": 0,
         "register_model_name": None,
     }
-    res = client.post("/api/v1/training-jobs", json=job_payload, headers=headers)
+    job_headers = {**headers, "Idempotency-Key": "retention-smoke", "X-Request-ID": "train-smoke"}
+    res = client.post("/api/v1/training-jobs", json=job_payload, headers=job_headers)
     assert res.status_code == 202, res.text
     job_id = res.json()["id"]
+
+    replay = client.post("/api/v1/training-jobs", json=job_payload, headers=job_headers)
+    assert replay.status_code == 202
+    assert replay.json()["id"] == job_id
+    conflict = client.post(
+        "/api/v1/training-jobs", json={**job_payload, "random_seed": 99}, headers=job_headers
+    )
+    assert conflict.status_code == 409
+    execute_training_job(job_id)  # Redelivery after completion does not duplicate experiments.
 
     # 6. Verify both experiments completed with real metrics
     res = client.get(f"/api/v1/training-jobs/{job_id}", headers=headers)
@@ -83,6 +98,7 @@ def test_complete_mlops_lifecycle_e2e(client: TestClient, training_csv: bytes):
     assert job_detail["status"] == "completed"
     experiments = job_detail["experiments"]
     assert len(experiments) == 2
+    assert job_detail["config"]["request_id"] == "train-smoke"
 
     exp1, exp2 = experiments[0], experiments[1]
     assert exp1["status"] == "completed"
@@ -124,6 +140,12 @@ def test_complete_mlops_lifecycle_e2e(client: TestClient, training_csv: bytes):
     model_version = res.json()
     model_version_id = model_version["id"]
     assert model_version["version"] == 1
+    detail = client.get(f"/api/v1/experiments/{best_exp_id}", headers=headers)
+    assert detail.status_code == 200
+    provenance = detail.json()["reference_profile"]["provenance"]
+    assert provenance["dataset_sha256"] == version["checksum"]
+    assert provenance["model_sha256"] == model_version["artifact_sha256"]
+    assert "scikit-learn" in provenance["packages"]
 
     res = client.post(
         f"/api/v1/model-versions/{model_version_id}/promote",
@@ -167,11 +189,17 @@ def test_complete_mlops_lifecycle_e2e(client: TestClient, training_csv: bytes):
     res = client.post(
         f"/api/v1/predictions/{deployment_id}",
         json={"records": normal_records},
-        headers={"X-API-Key": api_key},
+        headers={"X-API-Key": api_key, "X-Request-ID": "predict-smoke"},
     )
     assert res.status_code == 200, res.text
+    assert res.headers["X-Request-ID"] == res.json()["request_id"] == "predict-smoke"
     preds = res.json()["predictions"]
     assert len(preds) == 5
+    for invalid in ({"records": [{"age": ["nested"]}]}, {"records": normal_records, "extra": True}):
+        rejected = client.post(
+            f"/api/v1/predictions/{deployment_id}", json=invalid, headers={"X-API-Key": api_key}
+        )
+        assert rejected.status_code == 422
 
     res = client.get(f"/api/v1/deployments/{deployment_id}/predictions", headers=headers)
     assert res.status_code == 200
@@ -214,3 +242,13 @@ def test_complete_mlops_lifecycle_e2e(client: TestClient, training_csv: bytes):
     assert overview["counts"]["registered_models"] >= 1
     assert overview["counts"]["active_deployments"] >= 1
     assert overview["counts"]["predictions_7d"] >= 5
+
+    # A modified object cannot silently change a pinned training input.
+    dataset = db_session.get(DatasetVersion, version_id)
+    assert dataset is not None
+    get_storage().put_bytes(dataset.storage_key, training_csv + b"\n")
+    tampered = client.post("/api/v1/training-jobs", json=job_payload, headers=headers)
+    assert tampered.status_code == 202
+    assert tampered.json()["status"] == "failed"
+    assert "integrity check" in tampered.json()["error_message"]
+    assert not tampered.json()["experiments"]

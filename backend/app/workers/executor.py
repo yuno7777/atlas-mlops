@@ -17,25 +17,20 @@ class JobExecutor:
 
     def __init__(self, mode: str, workers: int) -> None:
         self.mode = mode
-        self.workers = workers
-        self._pool: ThreadPoolExecutor | None = None
+        self._pool = (
+            ThreadPoolExecutor(max_workers=workers, thread_name_prefix="atlas-training")
+            if mode == "thread"
+            else None
+        )
         self._futures: set[Future] = set()
         self._lock = threading.Lock()
-
-    @property
-    def pool(self) -> ThreadPoolExecutor:
-        if self._pool is None:
-            self._pool = ThreadPoolExecutor(
-                max_workers=max(1, self.workers), thread_name_prefix="atlas-training"
-            )
-        return self._pool
 
     def enqueue(self, job_id: str) -> None:
         if self.mode == "sync":
             self._run(job_id)
             return
-        if self.mode == "thread":
-            future = self.pool.submit(self._run, job_id)
+        if self._pool is not None:
+            future = self._pool.submit(self._run, job_id)
             with self._lock:
                 self._futures.add(future)
             future.add_done_callback(self._discard)
@@ -48,7 +43,7 @@ class JobExecutor:
             except Exception as exc:
                 logger.exception("Could not enqueue Celery task")
                 raise ServiceUnavailableError(
-                    "The background worker queue is unavailable.", details={"reason": str(exc)}
+                    "The background worker queue is unavailable."
                 ) from exc
             return
         raise ServiceUnavailableError(f"Unknown execution mode '{self.mode}'.")
