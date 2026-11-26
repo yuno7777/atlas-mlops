@@ -11,6 +11,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.exceptions import TrainingError
 from app.db.session import SessionLocal
 from app.ml.training import train_algorithm
 from app.models.registry import ModelVersion, RegisteredModel
@@ -205,6 +206,8 @@ def test_expired_worker_cannot_publish_and_retry_reuses_completed_algorithms(
             _expire_worker(job_id)
             assert recover_stale_jobs() == 1
             assert recover_stale_jobs() == 0
+            assert dispatch_due_training_jobs() == 0
+            _make_retry_due(job_id)
             assert dispatch_due_training_jobs() == 1
         finally:
             release.set()
@@ -285,3 +288,109 @@ def test_lease_expiring_during_registration_rolls_back_model_version(
     with SessionLocal() as db:
         assert db.scalar(select(func.count(ModelVersion.id))) == 0
         assert db.scalar(select(func.count(RegisteredModel.id))) == 0
+
+
+def _make_retry_due(job_id: str) -> None:
+    with SessionLocal.begin() as db:
+        record = db.get(TrainingDispatch, job_id)
+        assert record is not None
+        record.available_at = datetime.now(UTC) - timedelta(seconds=1)
+
+
+@pytest.mark.parametrize("cancelled", [False, True], ids=["execution-deadline", "cancel-grace"])
+def test_deadlines_fence_a_live_worker(client, auth_headers, submission, monkeypatch, cancelled):
+    monkeypatch.setattr("app.services.training.dispatch_training_job", Mock())
+    accepted = client.post(
+        "/api/v1/training-jobs",
+        headers=auth_headers,
+        json={
+            **submission,
+            "execution_policy": {
+                "timeout_seconds": 900,
+                "cancel_grace_seconds": 10,
+                "max_attempts": 3,
+            },
+        },
+    )
+    assert accepted.status_code == 202, accepted.text
+    job_id = accepted.json()["id"]
+    lease = TrainingLease(job_id, duration_seconds=120)
+    try:
+        with SessionLocal() as db:
+            assert lease.claim(db)
+            job = db.get(TrainingJob, job_id)
+            assert job.execution_deadline_at - job.started_at == timedelta(seconds=900)
+        if cancelled:
+            endpoint = f"/api/v1/training-jobs/{job_id}/cancel"
+            first = client.post(endpoint, headers=auth_headers)
+            repeated = client.post(endpoint, headers=auth_headers)
+            assert first.status_code == repeated.status_code == 200
+            assert first.json()["cancel_deadline_at"] == repeated.json()["cancel_deadline_at"]
+            assert first.json()["cancel_deadline_at"] is not None
+        with SessionLocal.begin() as db:
+            job = db.get(TrainingJob, job_id)
+            deadline = datetime.now(UTC) - timedelta(seconds=1)
+            if cancelled:
+                job.cancel_deadline_at = deadline
+            else:
+                job.execution_deadline_at = deadline
+        with SessionLocal.begin() as db, pytest.raises(LeaseLost):
+            lease.guard(db)
+        assert recover_stale_jobs(job_id) == 1
+    finally:
+        lease.close()
+    with SessionLocal() as db:
+        job = db.get(TrainingJob, job_id)
+        assert job.status == ("cancelled" if cancelled else "failed")
+        assert job.execution_attempt == 1
+        assert db.get(TrainingDispatch, job_id) is None
+        if not cancelled:
+            assert job.error_message == "Training exceeded its execution deadline."
+
+
+def test_transient_errors_back_off_and_exhaust_the_job_budget(
+    client, auth_headers, submission, monkeypatch
+):
+    def fail_fit(*_args):
+        raise TrainingError("Training dependency failed") from ConnectionError("connection reset")
+
+    fit = Mock(side_effect=fail_fit)
+    monkeypatch.setattr("app.services.training_runner.train_algorithm", fit)
+    response = client.post(
+        "/api/v1/training-jobs",
+        headers=auth_headers,
+        json={**submission, "execution_policy": {"max_attempts": 3, "retry_backoff_seconds": 10}},
+    )
+    assert response.status_code == 202, response.text
+    job_id = response.json()["id"]
+    for attempt, delay in [(1, 10), (2, 20)]:
+        with SessionLocal() as db:
+            job = db.get(TrainingJob, job_id)
+            assert job.status == "queued"
+            assert job.execution_attempt == attempt
+            record = db.get(TrainingDispatch, job_id)
+            available = record.available_at.replace(tzinfo=UTC)
+            remaining = (available - datetime.now(UTC)).total_seconds()
+            assert delay - 5 < remaining <= delay
+        assert dispatch_due_training_jobs() == 0
+        _make_retry_due(job_id)
+        assert dispatch_due_training_jobs() == 1
+    with SessionLocal() as db:
+        job = db.get(TrainingJob, job_id)
+        assert job.status == "failed"
+        assert job.execution_attempt == fit.call_count == 3
+        assert db.get(TrainingDispatch, job_id) is None
+
+
+def test_permanent_training_errors_are_not_retried(client, auth_headers, submission, monkeypatch):
+    fit = Mock(side_effect=TrainingError("Invalid data for fitting"))
+    monkeypatch.setattr("app.services.training_runner.train_algorithm", fit)
+    response = client.post(
+        "/api/v1/training-jobs",
+        headers=auth_headers,
+        json={**submission, "execution_policy": {"max_attempts": 3}},
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "failed"
+    assert response.json()["execution_attempt"] == fit.call_count == 1
+    assert dispatch_due_training_jobs() == 0

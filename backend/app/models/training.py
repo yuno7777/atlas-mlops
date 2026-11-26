@@ -64,6 +64,8 @@ class TrainingJob(Base, UUIDMixin, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     execution_token: Mapped[str | None] = mapped_column(String(36))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     execution_attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     dataset_version: Mapped[DatasetVersion] = relationship()  # noqa: F821

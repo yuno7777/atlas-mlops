@@ -77,6 +77,24 @@ attempts may leave unreferenced files or MLflow runs if they lose ownership duri
 external write. Those files cannot be selected through an uncommitted experiment or
 registry version.
 
+## Per-job execution policy
+
+A training submission can set an optional `execution_policy` object. Atlas stores the
+resolved policy with the job and returns the attempt number and active deadlines in job
+detail. Migration `0007_training_deadlines` adds nullable deadlines. Drain old workers
+before deploying it so all active executions use the new policy.
+
+| Field | Default | Behavior |
+| --- | --- | --- |
+| `timeout_seconds` | 6900 | Maximum time for one attempt, measured from claim. Queue and backoff time are excluded. A timeout ends the job. |
+| `cancel_grace_seconds` | 30 | Time for a running worker to stop cooperatively. Subsequent cancellation requests keep the original deadline. |
+| `max_attempts` | `TRAINING_MAX_ATTEMPTS` (2) | Total attempts for worker losses and transient execution failures. Training and validation errors are terminal. |
+| `retry_backoff_seconds` | 5 | Delay before the first execution retry. Later retries double that delay up to 300 seconds. Reconciliation can add scheduling latency. |
+
+Once either deadline passes, recovery can end the job and the old worker loses
+permission to commit results. Native estimator code can keep running until it
+returns. The deadline does not forcibly interrupt a Python thread.
+
 ## Storage and model trust
 
 For S3, pass `STORAGE_BACKEND=s3`, `S3_BUCKET`, optional `S3_REGION` and `S3_ENDPOINT_URL`, and credentials or workload identity to both the API and worker through a deployment override. Use a private bucket with workload-scoped access and object versioning. To move MLflow artifacts separately, set its `--artifacts-destination` and grant the tracking process access.

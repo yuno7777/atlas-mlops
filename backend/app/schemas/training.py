@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.experiment import ExperimentSummary
 
@@ -35,6 +35,15 @@ class AlgorithmSelection(BaseModel):
     hyperparameters: dict[str, Any] = Field(default_factory=dict)
 
 
+class TrainingExecutionPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    timeout_seconds: int = Field(default=6900, ge=1, le=6900, strict=True)
+    cancel_grace_seconds: int = Field(default=30, ge=1, le=300, strict=True)
+    max_attempts: int | None = Field(default=None, ge=1, le=5, strict=True)
+    retry_backoff_seconds: int = Field(default=5, ge=1, le=300, strict=True)
+
+
 class TrainingJobCreateRequest(BaseModel):
     project_id: str
     dataset_version_id: str
@@ -48,6 +57,7 @@ class TrainingJobCreateRequest(BaseModel):
     random_seed: int = Field(default=42, ge=0, le=2_147_483_647)
     cv_folds: int = Field(default=0, ge=0, le=10)
     register_model_name: str | None = Field(default=None, max_length=120)
+    execution_policy: TrainingExecutionPolicy | None = None
     workflow_run_id: str | None = Field(default=None, exclude=True)
 
     @field_validator("feature_columns")
@@ -113,6 +123,9 @@ class TrainingJobDetail(TrainingJobSummary):
     config: dict[str, Any]
     error_message: str | None
     cancel_requested: bool
+    execution_attempt: int = 0
+    execution_deadline_at: datetime | None = None
+    cancel_deadline_at: datetime | None = None
     experiments: list[ExperimentSummary]
     created_by: str
 

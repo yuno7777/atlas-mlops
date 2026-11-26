@@ -70,7 +70,9 @@ class TrainingRepository:
             self.db.execute(query.order_by(TrainingJobLog.id.asc()).limit(limit)).scalars().all()
         )
 
-    def claim_job(self, job_id: str, now: datetime, token: str, expires: datetime) -> bool:
+    def claim_job(
+        self, job_id: str, now: datetime, token: str, expires: datetime, deadline: datetime
+    ) -> bool:
         result = self.db.execute(
             update(TrainingJob)
             .where(TrainingJob.id == job_id, TrainingJob.status == JobStatus.QUEUED)
@@ -81,6 +83,8 @@ class TrainingRepository:
                 status_message="Starting",
                 execution_token=token,
                 lease_expires_at=expires,
+                execution_deadline_at=deadline,
+                cancel_deadline_at=None,
                 execution_attempt=TrainingJob.execution_attempt + 1,
             )
         )
@@ -104,6 +108,11 @@ class TrainingRepository:
                 TrainingJob.status == JobStatus.RUNNING,
                 TrainingJob.execution_token == token,
                 TrainingJob.lease_expires_at > now,
+                or_(
+                    TrainingJob.execution_deadline_at.is_(None),
+                    TrainingJob.execution_deadline_at > now,
+                ),
+                or_(TrainingJob.cancel_deadline_at.is_(None), TrainingJob.cancel_deadline_at > now),
             )
             .values(lease_expires_at=expires)
             .execution_options(synchronize_session=False)
@@ -113,7 +122,7 @@ class TrainingRepository:
     def clear_dispatch(self, job_id: str) -> None:
         self.db.execute(delete(TrainingDispatch).where(TrainingDispatch.job_id == job_id))
 
-    def request_cancellation(self, job_id: str, now: datetime) -> bool:
+    def request_cancellation(self, job_id: str, now: datetime, deadline: datetime) -> bool:
         cancelled = self.db.execute(
             update(TrainingJob)
             .where(TrainingJob.id == job_id, TrainingJob.status == JobStatus.QUEUED)
@@ -130,7 +139,11 @@ class TrainingRepository:
         requested = self.db.execute(
             update(TrainingJob)
             .where(TrainingJob.id == job_id, TrainingJob.status == JobStatus.RUNNING)
-            .values(cancel_requested=True, status_message="Cancellation requested")
+            .values(
+                cancel_requested=True,
+                cancel_deadline_at=func.coalesce(TrainingJob.cancel_deadline_at, deadline),
+                status_message="Cancellation requested",
+            )
         )
         return requested.rowcount == 1
 

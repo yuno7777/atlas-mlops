@@ -15,9 +15,10 @@ models deliberately, and be restored from backup.
 Milestone 2 includes transactional dispatch, execution leases, heartbeats, a bounded
 worker-loss retry, and reuse of completed algorithm runs. Regression coverage includes
 failure after commit, lost broker messages, competing dispatchers, loss during fitting,
-cancellation, and rollback when ownership expires during registration. Next are
-per-job deadlines and retry policies, queue priorities, per-project resource limits,
-and failure drills against the deployed broker and worker.
+cancellation, and rollback when ownership expires during registration. Per-job
+deadlines, cancellation grace, classified execution retries, and exponential
+backoff are implemented. Next are worker-process interruption, queue priorities,
+per-project resource limits, and failure drills against the deployed broker and worker.
 
 Native Windows and Linux runs use SQLite, local artifacts, and the thread worker.
 The Linux Compose profile keeps PostgreSQL, Redis, Celery, MLflow, and the production

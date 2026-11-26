@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.repositories.training import TrainingRepository
+from app.schemas.training import TrainingExecutionPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +29,17 @@ class TrainingLease:
 
     def claim(self, db: Session) -> bool:
         now = datetime.now(UTC)
-        claimed = TrainingRepository(db).claim_job(
-            self.job_id, now, self.token, now + self.duration
+        repository = TrainingRepository(db)
+        job = repository.get_job(self.job_id)
+        if job is None:
+            return False
+        policy = TrainingExecutionPolicy.model_validate(job.config.get("execution_policy", {}))
+        claimed = repository.claim_job(
+            self.job_id,
+            now,
+            self.token,
+            now + self.duration,
+            now + timedelta(seconds=policy.timeout_seconds),
         )
         db.commit()
         if claimed:

@@ -12,8 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+from botocore.exceptions import ConnectionError as StorageConnectionError
+from botocore.exceptions import ReadTimeoutError
 from sklearn.pipeline import Pipeline
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -31,6 +34,7 @@ from app.models.enums import ExperimentStatus, JobStatus
 from app.models.modelops import WorkflowRun
 from app.models.training import Experiment, TrainingDispatch, TrainingJob, TrainingJobLog
 from app.repositories.training import TrainingRepository
+from app.schemas.training import TrainingExecutionPolicy
 from app.services.storage import (
     ArtifactIntegrityError,
     copy_verified,
@@ -351,6 +355,8 @@ def execute_training_job(job_id: str) -> None:
             except LeaseLost:
                 raise
             except TrainingError as exc:
+                if _is_retryable(exc):
+                    raise
                 message = str(exc)
                 experiment.status = ExperimentStatus.FAILED
                 experiment.error_message = message[:4000]
@@ -358,6 +364,8 @@ def execute_training_job(job_id: str) -> None:
                 failures.append(f"{spec.label}: {message}")
                 _log(db, job, f"{spec.label} failed: {message}", level="error")
             except Exception as exc:  # unexpected algorithm error
+                if _is_retryable(exc):
+                    raise
                 message = str(exc).splitlines()[0][:300] or exc.__class__.__name__
                 experiment.status = ExperimentStatus.FAILED
                 experiment.error_message = f"Unexpected training error: {message}"
@@ -455,6 +463,8 @@ def execute_training_job(job_id: str) -> None:
                         f"Auto-registered best run as {model_version.registered_model.name} v{model_version.version}.",
                     )
                 except Exception as exc:
+                    if _is_retryable(exc):
+                        raise
                     logger.exception("Auto-registration failed", extra={"job_id": job.id})
                     _log(
                         db,
@@ -491,6 +501,7 @@ def execute_training_job(job_id: str) -> None:
     except LeaseLost:
         db.rollback()
         logger.warning("Training stopped after losing its lease", extra={"job_id": job_id})
+        _reconcile_interrupted_job(job_id)
     except Exception as exc:
         logger.exception("Training runner crashed", extra={"job_id": job_id})
         db.rollback()
@@ -499,12 +510,25 @@ def execute_training_job(job_id: str) -> None:
                 job = TrainingRepository(db).get_job_detail(job_id)
                 if job is not None:
                     lease.guard(db)
-                    _mark_job_failed(
-                        db, job, f"Training runner crashed: {str(exc).splitlines()[0][:300]}"
-                    )
-                    _commit_terminal(db, job, lease)
+                    if _is_retryable(exc):
+                        _end_interrupted_attempt(
+                            db,
+                            job,
+                            _now(),
+                            "Temporary training dependency failure.",
+                            allow_retry=True,
+                        )
+                        lease.commit(db)
+                        if job.status != JobStatus.QUEUED:
+                            TRAINING_JOBS.labels(status=job.status).inc()
+                    else:
+                        _mark_job_failed(
+                            db, job, f"Training runner crashed: {str(exc).splitlines()[0][:300]}"
+                        )
+                        _commit_terminal(db, job, lease)
             except LeaseLost:
                 db.rollback()
+                _reconcile_interrupted_job(job_id)
             except Exception:
                 logger.exception("Failed to mark crashed job as failed", extra={"job_id": job_id})
                 db.rollback()
@@ -527,7 +551,74 @@ def _format_metrics(metrics: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def recover_stale_jobs() -> int:
+def _is_retryable(exc: Exception) -> bool:
+    # The dataset and algorithm adapters can wrap their original exception.
+    return any(
+        isinstance(error, (ConnectionError, TimeoutError, StorageConnectionError, ReadTimeoutError))
+        or (isinstance(error, DBAPIError) and error.connection_invalidated)
+        for error in (exc, exc.__cause__)
+    )
+
+
+def _deadline_passed(deadline: datetime | None, now: datetime) -> bool:
+    if deadline is None:
+        return False
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+    return deadline <= now
+
+
+def _end_interrupted_attempt(
+    db: Session, job: TrainingJob, now: datetime, reason: str, *, allow_retry: bool
+) -> None:
+    policy = TrainingExecutionPolicy.model_validate(job.config.get("execution_policy", {}))
+    budget = policy.max_attempts or get_settings().training_max_attempts
+    retry = allow_retry and not job.cancel_requested and job.execution_attempt < budget
+    for experiment in job.experiments:
+        if experiment.status in {ExperimentStatus.RUNNING, ExperimentStatus.QUEUED}:
+            experiment.status = (
+                ExperimentStatus.CANCELLED if job.cancel_requested else ExperimentStatus.FAILED
+            )
+            experiment.error_message = reason
+            experiment.completed_at = now
+
+    job.execution_token = None
+    job.lease_expires_at = None
+    if retry:
+        delay = min(300, policy.retry_backoff_seconds * 2 ** max(0, job.execution_attempt - 1))
+        job.status = JobStatus.QUEUED
+        job.status_message = "Queued for retry"
+        job.progress = 0
+        job.started_at = None
+        job.execution_deadline_at = None
+        job.cancel_deadline_at = None
+        job.error_message = None
+        db.add(TrainingDispatch(job_id=job.id, available_at=now + timedelta(seconds=delay)))
+        _log(
+            db,
+            job,
+            f"{reason} Attempt {job.execution_attempt + 1} eligible in {delay}s.",
+            "warning",
+        )
+        return
+
+    job.status = JobStatus.CANCELLED if job.cancel_requested else JobStatus.FAILED
+    job.status_message = "Cancelled" if job.cancel_requested else "Failed"
+    job.error_message = None if job.cancel_requested else reason
+    job.completed_at = now
+    job.progress = min(job.progress, 99)
+    _log(db, job, reason, "warning")
+    _finish_workflow(db, job)
+
+
+def _reconcile_interrupted_job(job_id: str) -> None:
+    try:
+        recover_stale_jobs(job_id)
+    except Exception:
+        logger.exception("Could not reconcile interrupted training", extra={"job_id": job_id})
+
+
+def recover_stale_jobs(job_id: str | None = None) -> int:
     settings = get_settings()
     now = _now()
     legacy_timeout = timedelta(minutes=settings.stale_job_after_minutes)
@@ -538,70 +629,45 @@ def recover_stale_jobs() -> int:
     cutoff = now - legacy_timeout
     expired = or_(
         TrainingJob.lease_expires_at <= now,
+        TrainingJob.execution_deadline_at <= now,
+        TrainingJob.cancel_deadline_at <= now,
         and_(TrainingJob.execution_token.is_(None), TrainingJob.started_at < cutoff),
     )
+    candidates = select(TrainingJob.id).where(TrainingJob.status == JobStatus.RUNNING, expired)
+    if job_id is not None:
+        candidates = candidates.where(TrainingJob.id == job_id)
     with SessionLocal() as db:
         job_ids = list(
-            db.scalars(
-                select(TrainingJob.id)
-                .where(TrainingJob.status == JobStatus.RUNNING, expired)
-                .order_by(TrainingJob.lease_expires_at, TrainingJob.id)
-                .limit(100)
-            )
+            db.scalars(candidates.order_by(TrainingJob.lease_expires_at, TrainingJob.id).limit(100))
         )
 
     recovered = 0
-    for job_id in job_ids:
+    for candidate_id in job_ids:
         with SessionLocal.begin() as db:
-            # Claim recovery before touching experiments or the outbox. Renewal and
-            # recovery serialize on the same row in both PostgreSQL and SQLite.
+            # Renewal and recovery serialize on the same row.
             matched = db.execute(
                 update(TrainingJob)
-                .where(TrainingJob.id == job_id, TrainingJob.status == JobStatus.RUNNING, expired)
+                .where(
+                    TrainingJob.id == candidate_id, TrainingJob.status == JobStatus.RUNNING, expired
+                )
                 .values(lease_expires_at=None)
             )
             if matched.rowcount != 1:
                 continue
-            job = db.get(TrainingJob, job_id)
+            job = db.get(TrainingJob, candidate_id)
             assert job is not None
-            retry = (
-                job.execution_token is not None
-                and not job.cancel_requested
-                and job.execution_attempt < settings.training_max_attempts
-            )
-            job.execution_token = None
-            job.progress = 0 if retry else min(job.progress, 99)
-            if retry:
-                job.status = JobStatus.QUEUED
-                job.status_message = "Queued after worker lease expired"
-                job.started_at = None
-                job.error_message = None
-                db.add(TrainingDispatch(job_id=job.id))
-                _log(
-                    db,
-                    job,
-                    f"Worker lease expired; scheduling attempt {job.execution_attempt + 1}.",
-                    "warning",
-                )
+            timed_out = _deadline_passed(job.execution_deadline_at, now)
+            if job.cancel_requested:
+                reason = "Training cancelled after the worker stopped or the cancellation deadline elapsed."
+            elif timed_out:
+                reason = "Training exceeded its execution deadline."
             else:
-                job.status = JobStatus.CANCELLED if job.cancel_requested else JobStatus.FAILED
-                job.status_message = "Cancelled" if job.cancel_requested else "Failed (worker lost)"
-                job.error_message = (
-                    None if job.cancel_requested else "Worker lost; no automatic attempts remain."
-                )
-                job.completed_at = now
-                _log(db, job, job.error_message or "Cancelled after worker loss.", "warning")
-                _finish_workflow(db, job)
-            for experiment in job.experiments:
-                if experiment.status in {ExperimentStatus.RUNNING, ExperimentStatus.QUEUED}:
-                    experiment.status = (
-                        ExperimentStatus.CANCELLED
-                        if job.cancel_requested
-                        else ExperimentStatus.FAILED
-                    )
-                    experiment.error_message = "Interrupted by worker loss."
-                    experiment.completed_at = now
-            if not retry:
-                TRAINING_JOBS.labels(status=job.status).inc()
+                reason = "Training worker lease expired."
+            _end_interrupted_attempt(
+                db, job, now, reason, allow_retry=job.execution_token is not None and not timed_out
+            )
+            status = job.status
             recovered += 1
+        if status != JobStatus.QUEUED:
+            TRAINING_JOBS.labels(status=status).inc()
     return recovered

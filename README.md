@@ -166,7 +166,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --
 Use the same `Idempotency-Key` when retrying a training submission after a transport failure. Each key is scoped to the project and submitting user. A changed request with the same key returns `409`. Keep the recorded dataset and model SHA-256 digests, seed, code revision, and Python package versions with the run.
 
 - **Readiness returns 503.** Check the named dependency in `/ready`. Celery mode checks Redis as well as PostgreSQL and artifact storage.
-- **A training job remains queued.** Check Redis, the worker, and beat. Reconciliation republishes old queued jobs. A stale running job is marked failed and can be resubmitted with a new idempotency key.
+- **A training job remains queued.** Check Redis, the worker, and beat. Reconciliation republishes old queued jobs. A job interrupted by worker loss is retried within its attempt budget. A job that exhausts its budget can be resubmitted with a new idempotency key.
 - **A model returns 503.** Check the deployment state and registry artifact digest, restore verified bytes from backup, or register a fresh run. A busy inference pool also returns 503. Scoring deadlines return 504.
 - **Drift is missing from Grafana.** Scrape the API at `backend:8000/metrics` and the Celery worker at `worker:9101/metrics` from the Compose network. Use `atlas_http_requests_total`, `atlas_http_request_duration_seconds`, and `atlas_drift_signals_total` for request and drift panels.
 

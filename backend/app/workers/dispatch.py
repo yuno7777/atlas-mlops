@@ -20,6 +20,7 @@ DISPATCH_BATCH_SIZE = 100
 
 def dispatch_training_job(job_id: str) -> bool:
     now = datetime.now(UTC)
+    reserved_until = now + DISPATCH_LEASE
     queued = (
         select(TrainingJob.id)
         .where(TrainingJob.id == job_id, TrainingJob.status == JobStatus.QUEUED)
@@ -31,7 +32,7 @@ def dispatch_training_job(job_id: str) -> bool:
         attempt = db.scalar(
             update(TrainingDispatch)
             .where(TrainingDispatch.job_id == job_id, TrainingDispatch.available_at <= now, queued)
-            .values(available_at=now + DISPATCH_LEASE, attempts=TrainingDispatch.attempts + 1)
+            .values(available_at=reserved_until, attempts=TrainingDispatch.attempts + 1)
             .returning(TrainingDispatch.attempts)
         )
     if attempt is None:
@@ -53,7 +54,11 @@ def dispatch_training_job(job_id: str) -> bool:
     with SessionLocal.begin() as db:
         updated = db.execute(
             update(TrainingDispatch)
-            .where(TrainingDispatch.job_id == job_id, TrainingDispatch.attempts == attempt)
+            .where(
+                TrainingDispatch.job_id == job_id,
+                TrainingDispatch.attempts == attempt,
+                TrainingDispatch.available_at == reserved_until,
+            )
             .values(available_at=datetime.now(UTC) + delay)
         )
         if updated.rowcount == 1 and not delivered and attempt == 1:
