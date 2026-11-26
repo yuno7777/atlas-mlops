@@ -13,7 +13,9 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.exceptions import TrainingError
 from app.db.session import SessionLocal
+from app.ml.algorithms import get_algorithm
 from app.ml.training import train_algorithm
+from app.ml.validation import read_dataframe
 from app.models.registry import ModelVersion, RegisteredModel
 from app.models.training import TrainingDispatch, TrainingJob
 from app.models.user import Project
@@ -191,14 +193,20 @@ def test_expired_worker_cannot_publish_and_retry_reuses_completed_algorithms(
     release = Event()
     fitted = []
 
-    def stop_first_forest(data, spec, hyperparameters, config):
-        fitted.append(spec.id)
-        if spec.id == "random_forest_classifier" and fitted.count(spec.id) == 1:
+    def stop_first_forest(path, name, algorithm, hyperparameters, config, *, check_active):
+        fitted.append(algorithm)
+        if algorithm == "random_forest_classifier" and fitted.count(algorithm) == 1:
             fitting.set()
             assert release.wait(timeout=15)
-        return train_algorithm(data, spec, hyperparameters, config)
+        check_active()
+        return train_algorithm(
+            read_dataframe(path, name),
+            get_algorithm(algorithm, config.problem_type),
+            hyperparameters,
+            config,
+        )
 
-    monkeypatch.setattr("app.services.training_runner.train_algorithm", stop_first_forest)
+    monkeypatch.setattr("app.services.training_runner.run_fit", stop_first_forest)
     with ThreadPoolExecutor(1) as pool:
         expired_worker = pool.submit(execute_training_job, job_id)
         try:
@@ -351,11 +359,11 @@ def test_deadlines_fence_a_live_worker(client, auth_headers, submission, monkeyp
 def test_transient_errors_back_off_and_exhaust_the_job_budget(
     client, auth_headers, submission, monkeypatch
 ):
-    def fail_fit(*_args):
+    def fail_fit(*_args, **_kwargs):
         raise TrainingError("Training dependency failed") from ConnectionError("connection reset")
 
     fit = Mock(side_effect=fail_fit)
-    monkeypatch.setattr("app.services.training_runner.train_algorithm", fit)
+    monkeypatch.setattr("app.services.training_runner.run_fit", fit)
     response = client.post(
         "/api/v1/training-jobs",
         headers=auth_headers,
@@ -384,7 +392,7 @@ def test_transient_errors_back_off_and_exhaust_the_job_budget(
 
 def test_permanent_training_errors_are_not_retried(client, auth_headers, submission, monkeypatch):
     fit = Mock(side_effect=TrainingError("Invalid data for fitting"))
-    monkeypatch.setattr("app.services.training_runner.train_algorithm", fit)
+    monkeypatch.setattr("app.services.training_runner.run_fit", fit)
     response = client.post(
         "/api/v1/training-jobs",
         headers=auth_headers,
@@ -394,3 +402,107 @@ def test_permanent_training_errors_are_not_retried(client, auth_headers, submiss
     assert response.json()["status"] == "failed"
     assert response.json()["execution_attempt"] == fit.call_count == 1
     assert dispatch_due_training_jobs() == 0
+
+
+@pytest.fixture
+def blocked_fit_process(tmp_path, monkeypatch):
+    import sys
+
+    started = tmp_path / "fit-started"
+    command = """
+import sys
+import time
+from pathlib import Path
+from app.ml import training
+from app.workers.fit_worker import main
+
+def slow_fit(*args, **kwargs):
+    Path(sys.argv.pop()).touch()
+    time.sleep(60)
+    raise AssertionError("A stopped fit must never return")
+
+training.train_algorithm = slow_fit
+main()
+"""
+
+    def fit_command(directory):
+        return [sys.executable, "-c", command, str(directory), str(started)]
+
+    monkeypatch.setattr("app.workers.fit_process._fit_command", fit_command)
+    return started, fit_command
+
+
+def _wait_for_fit_marker(marker):
+    import time
+
+    until = time.monotonic() + 20
+    while not marker.is_file() and time.monotonic() < until:
+        time.sleep(0.05)
+    assert marker.is_file(), "Fit process did not reach the estimator"
+
+
+@pytest.mark.parametrize("cancelled", [True, False], ids=["cancel", "deadline"])
+def test_supervisor_stops_a_live_fit(
+    client, auth_headers, submission, blocked_fit_process, monkeypatch, cancelled
+):
+    monkeypatch.setattr("app.services.training.dispatch_training_job", Mock())
+    received = client.post("/api/v1/training-jobs", headers=auth_headers, json=submission)
+    assert received.status_code == 202, received.text
+    job_id = received.json()["id"]
+    with ThreadPoolExecutor(1) as pool:
+        worker = pool.submit(execute_training_job, job_id)
+        try:
+            _wait_for_fit_marker(blocked_fit_process[0])
+            if cancelled:
+                response = client.post(
+                    f"/api/v1/training-jobs/{job_id}/cancel", headers=auth_headers
+                )
+                assert response.status_code == 200
+            else:
+                with SessionLocal.begin() as db:
+                    job = db.get(TrainingJob, job_id)
+                    job.execution_deadline_at = datetime.now(UTC) - timedelta(seconds=1)
+            worker.result(timeout=8)
+        finally:
+            if not worker.done():
+                _expire_worker(job_id)
+    response = client.get(f"/api/v1/training-jobs/{job_id}", headers=auth_headers).json()
+    assert response["status"] == ("cancelled" if cancelled else "failed")
+    assert response["execution_attempt"] == 1
+    assert not any(experiment["artifact_available"] for experiment in response["experiments"])
+
+
+def test_fit_worker_exits_when_parent_pipe_closes(tmp_path, blocked_fit_process):
+    import json
+    import subprocess
+
+    from app.workers.fit_process import BACKEND_ROOT
+
+    snapshot = tmp_path / "dataset.csv"
+    snapshot.write_text("x,y,target\n" + "1,1,0\n" * 24, encoding="utf-8")
+    (tmp_path / "input.json").write_text(
+        json.dumps(
+            {
+                "dataset_path": str(snapshot),
+                "original_filename": "dataset.csv",
+                "config": {
+                    "problem_type": "classification",
+                    "target_column": "target",
+                    "feature_columns": None,
+                },
+                "algorithm": "logistic_regression",
+                "hyperparameters": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    marker, command = blocked_fit_process
+    with subprocess.Popen(command(tmp_path), cwd=BACKEND_ROOT, stdin=subprocess.PIPE) as worker:
+        try:
+            _wait_for_fit_marker(marker)
+            worker.stdin.close()
+            assert worker.wait(timeout=8) == 2
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+    assert not (tmp_path / "result.joblib").exists()

@@ -19,6 +19,10 @@ class LeaseLost(RuntimeError):
     """The worker can no longer write results for this job."""
 
 
+class FitCancelled(RuntimeError):
+    """The job owner asked for its fit process to stop."""
+
+
 class TrainingLease:
     def __init__(self, job_id: str, duration_seconds: int) -> None:
         self.job_id = job_id
@@ -51,6 +55,14 @@ class TrainingLease:
         now = datetime.now(UTC)
         if not TrainingRepository(db).update_lease(self.job_id, self.token, now + self.duration):
             raise LeaseLost(self.job_id)
+
+    def check_fitting(self) -> None:
+        with SessionLocal() as db:
+            requested = TrainingRepository(db).fit_cancellation_requested(self.job_id, self.token)
+        if requested is None:
+            raise LeaseLost(self.job_id)
+        if requested:
+            raise FitCancelled(self.job_id)
 
     def commit(self, db: Session) -> None:
         self.guard(db)
