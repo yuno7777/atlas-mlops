@@ -72,6 +72,17 @@ class TrainingJob(Base, UUIDMixin, TimestampMixin):
     )
 
 
+class TrainingDispatch(Base):
+    __tablename__ = "training_dispatch"
+    __table_args__ = (Index("ix_training_dispatch_due", "available_at", "job_id"),)
+
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("training_jobs.id", ondelete="CASCADE"), primary_key=True
+    )
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class TrainingJobLog(Base):
     __tablename__ = "training_job_logs"
     __table_args__ = (Index("ix_training_job_logs_job_id", "job_id", "id"),)

@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import (
     ConflictError,
     NotFoundError,
-    ServiceUnavailableError,
     ValidationError,
 )
 from app.core.logging import request_id_ctx
@@ -21,7 +20,7 @@ from app.ml.evaluation import metric_directions
 from app.ml.utils import float_or_none
 from app.models.dataset import DatasetVersion
 from app.models.enums import JobStatus, ProblemType
-from app.models.training import Experiment, TrainingJob, TrainingJobLog
+from app.models.training import Experiment, TrainingDispatch, TrainingJob, TrainingJobLog
 from app.models.user import User
 from app.repositories.datasets import DatasetRepository
 from app.repositories.training import ExperimentRepository, TrainingRepository
@@ -40,7 +39,7 @@ from app.schemas.training import (
 )
 from app.services.access import require_project
 from app.services.audit import record_audit
-from app.workers.executor import get_job_executor
+from app.workers.dispatch import dispatch_training_job
 
 
 def _job_duration(job: TrainingJob) -> float | None:
@@ -275,6 +274,7 @@ def create_training_job(
             if replay is not None:
                 return replay
         raise
+    db.add(TrainingDispatch(job_id=job.id))
     if payload.workflow_run_id:
         workflow_run.training_job_id = job.id
         workflow_run.status = "queued"
@@ -305,19 +305,7 @@ def create_training_job(
     )
     db.commit()
 
-    try:
-        get_job_executor().enqueue(job.id)
-    except ServiceUnavailableError:
-        # A broker publish can succeed before the client receives an error. Keep the
-        # durable queued job so reconciliation can deliver it safely.
-        db.add(
-            TrainingJobLog(
-                job_id=job.id,
-                level="warning",
-                message="Queue unavailable; awaiting dispatch recovery.",
-            )
-        )
-        db.commit()
+    dispatch_training_job(job.id)
 
     db.expire_all()
     return get_training_job(db, user, job.id)
@@ -399,16 +387,8 @@ def cancel_training_job(
     if job is None:
         raise NotFoundError("Training job not found.")
     project, _role = require_project(db, user, job.project_id, write=True)
-    if job.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}:
+    if not repository.request_cancellation(job.id, datetime.now(UTC)):
         raise ConflictError("This job has already finished.")
-    if job.status == JobStatus.QUEUED:
-        job.status = JobStatus.CANCELLED
-        job.completed_at = datetime.now(UTC)
-        job.status_message = "Cancelled before execution"
-    else:
-        job.cancel_requested = True
-        job.status_message = "Cancellation requested"
-    db.add(job)
     db.add(
         TrainingJobLog(
             job_id=job.id,

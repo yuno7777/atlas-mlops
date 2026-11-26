@@ -39,9 +39,8 @@ class JobExecutor:
             try:
                 from app.workers.tasks import run_training_job_task
 
-                run_training_job_task.delay(job_id)
+                run_training_job_task.apply_async(args=(job_id,), retry=False)
             except Exception as exc:
-                logger.exception("Could not enqueue Celery task")
                 raise ServiceUnavailableError(
                     "The background worker queue is unavailable."
                 ) from exc

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.dataset import DatasetVersion
 from app.models.enums import JobStatus
 from app.models.registry import ModelVersion
-from app.models.training import Experiment, TrainingJob, TrainingJobLog
+from app.models.training import Experiment, TrainingDispatch, TrainingJob, TrainingJobLog
 
 
 class TrainingRepository:
@@ -76,7 +76,34 @@ class TrainingRepository:
             .where(TrainingJob.id == job_id, TrainingJob.status == JobStatus.QUEUED)
             .values(status=JobStatus.RUNNING, started_at=now, progress=1, status_message="Starting")
         )
-        return result.rowcount == 1
+        if result.rowcount != 1:
+            return False
+        self.clear_dispatch(job_id)
+        return True
+
+    def clear_dispatch(self, job_id: str) -> None:
+        self.db.execute(delete(TrainingDispatch).where(TrainingDispatch.job_id == job_id))
+
+    def request_cancellation(self, job_id: str, now: datetime) -> bool:
+        cancelled = self.db.execute(
+            update(TrainingJob)
+            .where(TrainingJob.id == job_id, TrainingJob.status == JobStatus.QUEUED)
+            .values(
+                status=JobStatus.CANCELLED,
+                completed_at=now,
+                status_message="Cancelled before execution",
+            )
+        )
+        if cancelled.rowcount == 1:
+            self.clear_dispatch(job_id)
+            return True
+
+        requested = self.db.execute(
+            update(TrainingJob)
+            .where(TrainingJob.id == job_id, TrainingJob.status == JobStatus.RUNNING)
+            .values(cancel_requested=True, status_message="Cancellation requested")
+        )
+        return requested.rowcount == 1
 
     def add(self, entity: object) -> None:
         self.db.add(entity)
